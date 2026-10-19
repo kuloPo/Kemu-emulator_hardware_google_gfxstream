@@ -148,6 +148,94 @@ class FrameBufferTest : public ::testing::Test {
 TEST_F(FrameBufferTest, FrameBufferBasic) {
 }
 
+class VulkanFrameRecordingTest : public ::testing::TestWithParam<GfxstreamFormat> {
+  protected:
+    void SetUp() override {
+        ASSERT_TRUE(gfxstream::testing::SetupGraphicsTestEnvironment());
+        FeatureSet features;
+        features.Vulkan.setEnabled(true);
+        features.GuestVulkanOnly.setEnabled(true);
+        features.VulkanNativeSwapchain.setEnabled(true);
+        features.GlDirectMem.setEnabled(true);
+        ASSERT_TRUE(FrameBuffer::initialize(kWidth, kHeight, features, false));
+        mFb = FrameBuffer::getFB();
+        ASSERT_NE(mFb, nullptr);
+        ASSERT_EQ(mFb->getEmulationGl(), nullptr);
+        ASSERT_FALSE(mFb->asyncReadbackSupported());
+    }
+
+    void TearDown() override {
+        FrameBuffer::finalize();
+    }
+
+    static void onPost(void* context, uint32_t displayId, int width, int height,
+                       int ydir, int format, int type, unsigned char* pixels) {
+        auto* test = static_cast<VulkanFrameRecordingTest*>(context);
+        EXPECT_EQ(displayId, 0u);
+        EXPECT_EQ(width, kWidth);
+        EXPECT_EQ(height, kHeight);
+        test->mPixels.assign(pixels, pixels + kWidth * kHeight * 4);
+        std::vector<uint8_t> copied(test->mPixels.size(), 0);
+        test->mFb->getPixels(copied.data(), copied.size(), displayId);
+        EXPECT_EQ(copied, test->mPixels);
+        ++test->mCallbacks;
+    }
+
+    static constexpr int kWidth = 8;
+    static constexpr int kHeight = 4;
+    FrameBuffer* mFb = nullptr;
+    std::vector<uint8_t> mPixels;
+    int mCallbacks = 0;
+};
+
+TEST_P(VulkanFrameRecordingTest, CapturesRepostsAndRestartsWithoutGl) {
+    const auto handle = mFb->createColorBuffer(kWidth, kHeight, GetParam());
+    ASSERT_NE(handle, 0u);
+    ASSERT_EQ(mFb->openColorBuffer(handle), 0);
+
+    std::vector<uint8_t> rgba(kWidth * kHeight * 4);
+    for (size_t i = 0; i < rgba.size(); i += 4) {
+        rgba[i] = static_cast<uint8_t>(i);
+        rgba[i + 1] = 31;
+        rgba[i + 2] = 199;
+        rgba[i + 3] = 255;
+    }
+    auto bgra = rgba;
+    for (size_t i = 0; i < bgra.size(); i += 4) {
+        std::swap(bgra[i], bgra[i + 2]);
+    }
+    auto& input = GetParam() == GfxstreamFormat::B8G8R8A8_UNORM ? bgra : rgba;
+    ASSERT_TRUE(mFb->updateColorBuffer(handle, 0, 0, kWidth, kHeight, GetParam(), input.data()));
+
+    // Removing a callback before any recording must not wait on an unstarted worker.
+    mFb->setPostCallback(nullptr, nullptr, 0, true);
+    mFb->setPostCallback(onPost, this, 0, true);
+    ASSERT_TRUE(mFb->post(handle));
+    ASSERT_EQ(mCallbacks, 1);
+    EXPECT_EQ(mPixels, bgra);
+
+    ASSERT_TRUE(mFb->repost());
+    EXPECT_EQ(mCallbacks, 2);
+    EXPECT_EQ(mPixels, bgra);
+    mFb->flushReadPipeline(0);
+    EXPECT_EQ(mCallbacks, 2);
+
+    mFb->setPostCallback(nullptr, nullptr, 0, true);
+    ASSERT_TRUE(mFb->post(handle));
+    EXPECT_EQ(mCallbacks, 2);
+
+    mFb->setPostCallback(onPost, this, 0, false);
+    ASSERT_TRUE(mFb->repost());
+    EXPECT_EQ(mCallbacks, 3);
+    EXPECT_EQ(mPixels, rgba);
+    mFb->setPostCallback(nullptr, nullptr, 0, false);
+    mFb->closeColorBuffer(handle);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    NativeFormats, VulkanFrameRecordingTest,
+    ::testing::Values(GfxstreamFormat::R8G8B8A8_UNORM, GfxstreamFormat::B8G8R8A8_UNORM));
+
 // Tests the creation of a single color buffer for the framebuffer.
 TEST_F(FrameBufferTest, CreateColorBuffer) {
     HandleType handle =

@@ -428,6 +428,7 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
     bool hasGuestPostedAFrame() { return m_guestPostedAFrameTime.has_value(); }
     void resetGuestPostedAFrame() { m_guestPostedAFrameTime = std::nullopt; }
 
+    void doPostCallbacks(const ColorBufferPtr& colorBuffer, bool repaint);
     void doPostCallback(void* pixels, uint32_t displayId);
 
     void getPixels(void* pixels, uint32_t bytes, uint32_t displayId);
@@ -1729,6 +1730,11 @@ void FrameBuffer::Impl::setPostCallback(Renderer::OnPostCallback onPost, void* o
         m_onPost[displayId].height = h;
         m_onPost[displayId].img = new unsigned char[4 * w * h];
         m_onPost[displayId].readBgra = useBgraReadback;
+        // Vulkan-only rendering has no GL readback worker. Its pixels are
+        // available synchronously when the post callback is invoked.
+        if (!m_emulationGl) {
+            return;
+        }
         bool expectedReadbackThreadStarted = false;
         if (m_readbackThreadStarted.compare_exchange_strong(expectedReadbackThreadStarted, true)) {
             m_readbackThread.start();
@@ -1738,9 +1744,11 @@ void FrameBuffer::Impl::setPostCallback(Renderer::OnPostCallback onPost, void* o
             {ReadbackCmd::AddRecordDisplay, displayId, nullptr, 0, w, h});
         completeFuture.wait();
     } else {
-        std::future<void> completeFuture = m_readbackThread.enqueue(
-            {ReadbackCmd::DelRecordDisplay, displayId});
-        completeFuture.wait();
+        if (m_readbackThreadStarted) {
+            std::future<void> completeFuture = m_readbackThread.enqueue(
+                {ReadbackCmd::DelRecordDisplay, displayId});
+            completeFuture.wait();
+        }
         m_onPost.erase(displayId);
     }
 }
@@ -2679,6 +2687,16 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
     //
     // Send framebuffer (without FPS overlay) to callback
     //
+    doPostCallbacks(colorBuffer, repaint);
+
+    if (!m_subWin) {  // m_subWin is supposed to be false
+        decColorBufferRefCountLocked(p_colorbuffer);
+    }
+
+    return ret;
+}
+
+void FrameBuffer::Impl::doPostCallbacks(const ColorBufferPtr& colorBuffer, bool repaint) {
     if (!m_onPost.empty()) {
         for (auto& iter : m_onPost) {
             ColorBufferPtr cb;
@@ -2701,7 +2719,38 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
                 }
             }
 
-            if (asyncReadbackSupported()) {
+            if (!m_emulationGl) {
+                auto& post = iter.second;
+                const auto format = cb->getFormat();
+                const bool rgba = format == GfxstreamFormat::R8G8B8A8_UNORM ||
+                                  format == GfxstreamFormat::R8G8B8X8_UNORM;
+                const bool bgra = format == GfxstreamFormat::B8G8R8A8_UNORM;
+                const bool nativeSize = cb->getWidth() == post.width &&
+                                        cb->getHeight() == post.height;
+                const size_t bytes = size_t(post.width) * post.height * 4;
+                bool pixelsAreBgra = false;
+                bool read = false;
+                if (nativeSize && (rgba || bgra)) {
+                    read = m_emulationVk->readColorBufferToBytes(
+                        cb->getHndl(), 0, 0, post.width, post.height, post.img, bytes);
+                    pixelsAreBgra = bgra;
+                } else {
+                    read = m_emulationVk->readColorBufferPixelsScaled(
+                        cb->getHndl(), post.width, post.height, GFXSTREAM_ROTATION_0, {},
+                        GfxstreamFormat::R8G8B8A8_UNORM, post.img, std::nullopt);
+                }
+                if (!read) {
+                    GFXSTREAM_ERROR("Failed to read Vulkan recording frame for display %u",
+                                    iter.first);
+                    continue;
+                }
+                if (pixelsAreBgra != post.readBgra) {
+                    for (size_t i = 0; i < bytes; i += 4) {
+                        std::swap(post.img[i], post.img[i + 2]);
+                    }
+                }
+                doPostCallback(post.img, iter.first);
+            } else if (asyncReadbackSupported()) {
                 ensureReadbackWorker();
                 const auto status = m_readbackWorker->doNextReadback(
                     iter.first, cb.get(), iter.second.img, repaint, iter.second.readBgra);
@@ -2718,12 +2767,6 @@ AsyncResult FrameBuffer::Impl::postImpl(HandleType p_colorbuffer, Post::Completi
             }
         }
     }
-
-    if (!m_subWin) {  // m_subWin is supposed to be false
-        decColorBufferRefCountLocked(p_colorbuffer);
-    }
-
-    return ret;
 }
 
 void FrameBuffer::Impl::doPostCallback(void* pixels, uint32_t displayId) {
@@ -2742,12 +2785,22 @@ void FrameBuffer::Impl::getPixels(void* pixels, uint32_t bytes, uint32_t display
         GFXSTREAM_ERROR("Display %d not configured for recording yet", displayId);
         return;
     }
+    if (!m_emulationGl) {
+        // Synchronous post callbacks consume the completed CPU image directly.
+        const auto& post = iter->second;
+        memcpy(pixels, post.img, std::min(size_t(bytes), size_t(post.width) * post.height * 4));
+        return;
+    }
     std::future<void> completeFuture =
         m_readbackThread.enqueue({ReadbackCmd::GetPixels, displayId, pixels, bytes});
     completeFuture.wait();
 }
 
 void FrameBuffer::Impl::flushReadPipeline(int displayId) {
+    if (!m_emulationGl) {
+        // Vulkan frames have already been read before notifying consumers.
+        return;
+    }
     const auto& iter = m_onPost.find(displayId);
     if (iter == m_onPost.end()) {
         GFXSTREAM_ERROR("Cannot find onPost pixels for display %d", displayId);
@@ -2798,6 +2851,20 @@ Renderer::FlushReadPixelPipeline FrameBuffer::Impl::getFlushReadPixelPipeline() 
 bool FrameBuffer::Impl::repost(bool needLockAndBind) {
     GFXSTREAM_DEBUG("Reposting framebuffer.");
     if (m_displayVk) {
+        if (!m_emulationGl) {
+            std::optional<AutoLock> lock;
+            if (needLockAndBind) {
+                lock.emplace(m_lock);
+            }
+            if (!m_onPost.empty() && m_lastPostedColorBuffer &&
+                sInitialized.load(std::memory_order_relaxed)) {
+                auto cb = std::static_pointer_cast<ColorBuffer>(
+                    findColorBuffer(m_lastPostedColorBuffer));
+                if (cb) {
+                    doPostCallbacks(cb, true);
+                }
+            }
+        }
         setGuestPostedAFrame();
         return true;
     }
