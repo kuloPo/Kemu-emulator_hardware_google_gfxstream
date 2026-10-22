@@ -510,6 +510,12 @@ class FrameBuffer::Impl : public gfxstream::base::EventNotificationSupport<Frame
 
     void setDisplayLayout(int screenWidth, int screenHeight, const Rect& displayRect);
 
+    std::string_view getCurrentGuestProcessName() const override {
+        const auto* threadInfo = RenderThreadInfo::get();
+        if (!threadInfo || !threadInfo->m_processName) return {};
+        return *threadInfo->m_processName;
+    }
+
     void registerVulkanInstance(uint64_t id, std::string_view appName) const override;
     void unregisterVulkanInstance(uint64_t id) const override;
 

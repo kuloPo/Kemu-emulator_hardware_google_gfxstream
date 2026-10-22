@@ -64,6 +64,9 @@ class GlobalState {
     virtual CancelableFuture scheduleAsyncWork(std::function<void()> work,
                                                std::string_view description) = 0;
 
+    // The view is valid until process metadata changes on the current render thread.
+    virtual std::string_view getCurrentGuestProcessName() const { return {}; }
+
     virtual void registerVulkanInstance(uint64_t id, std::string_view appName) const {}
     virtual void unregisterVulkanInstance(uint64_t id) const {}
 };

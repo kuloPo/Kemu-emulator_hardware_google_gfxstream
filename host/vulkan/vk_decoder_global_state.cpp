@@ -3170,6 +3170,23 @@ class VkDecoderGlobalState::Impl {
             return VK_ERROR_OUT_OF_HOST_MEMORY;
         }
 
+        // Work around unsupported LINEAR input attachment usage in Genshin.
+        const auto* globalState = m_vkEmulation->getGlobalState();
+        const std::string_view guestProcessName =
+            globalState ? globalState->getCurrentGuestProcessName() : std::string_view{};
+        const VkImageUsageFlags requestedUsage = pCreateInfo->usage;
+        const bool removeLinearInputAttachment =
+            (guestProcessName == "com.miHoYo.Yuanshen" ||
+             guestProcessName == "com.miHoYo.GenshinImpact") &&
+            pCreateInfo->tiling == VK_IMAGE_TILING_LINEAR &&
+            (requestedUsage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) != 0;
+        VkImageCreateInfo linearUsageInfo;
+        if (removeLinearInputAttachment) {
+            linearUsageInfo = *pCreateInfo;
+            linearUsageInfo.usage &= ~VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+            pCreateInfo = &linearUsageInfo;
+        }
+
         // Change creation parameters before the validation checks below as the
         // creation format and its device properties may change
         const bool needDecompression = deviceInfo->needEmulatedDecompression(pCreateInfo->format);
@@ -3224,6 +3241,18 @@ class VkDecoderGlobalState::Impl {
             }
         } else {
             createRes = vk->vkCreateImage(device, pCreateInfo, nullptr, pImage);
+        }
+
+        if (removeLinearInputAttachment) {
+            GFXSTREAM_WARNING(
+                "Removing INPUT_ATTACHMENT from LINEAR image: process=%.*s "
+                "format=%u size=%ux%ux%u usage=0x%x->0x%x tiling=%d "
+                "initialLayout=%d result=%d image=%p",
+                static_cast<int>(guestProcessName.size()), guestProcessName.data(),
+                pCreateInfo->format, pCreateInfo->extent.width, pCreateInfo->extent.height,
+                pCreateInfo->extent.depth, requestedUsage, pCreateInfo->usage,
+                static_cast<int>(pCreateInfo->tiling), static_cast<int>(pCreateInfo->initialLayout),
+                createRes, createRes == VK_SUCCESS ? *pImage : VK_NULL_HANDLE);
         }
 
         if (createRes != VK_SUCCESS) return createRes;

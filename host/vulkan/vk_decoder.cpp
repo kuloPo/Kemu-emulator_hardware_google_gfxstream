@@ -4079,11 +4079,11 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 uint64_t cgen_var_1;
                 memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
                 *readStreamPtrPtr += 1 * 8;
-                *(VkBuffer*)&srcBuffer = (VkBuffer)unbox_VkBuffer((VkBuffer)(*&cgen_var_1));
+                *(VkBuffer*)&srcBuffer = (VkBuffer)try_unbox_VkBuffer((VkBuffer)(*&cgen_var_1));
                 uint64_t cgen_var_2;
                 memcpy((uint64_t*)&cgen_var_2, *readStreamPtrPtr, 1 * 8);
                 *readStreamPtrPtr += 1 * 8;
-                *(VkBuffer*)&dstBuffer = (VkBuffer)unbox_VkBuffer((VkBuffer)(*&cgen_var_2));
+                *(VkBuffer*)&dstBuffer = (VkBuffer)try_unbox_VkBuffer((VkBuffer)(*&cgen_var_2));
                 memcpy((uint32_t*)&regionCount, *readStreamPtrPtr, sizeof(uint32_t));
                 *readStreamPtrPtr += sizeof(uint32_t);
                 vkReadStream->alloc((void**)&pRegions, regionCount * sizeof(const VkBufferCopy));
@@ -4103,12 +4103,19 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         (unsigned long long)dstBuffer, (unsigned long long)regionCount,
                         (unsigned long long)pRegions);
                 }
-                if (CC_LIKELY(vk)) {
+                const bool validCopyBuffers =
+                    srcBuffer != VK_NULL_HANDLE && dstBuffer != VK_NULL_HANDLE;
+                if (!validCopyBuffers) {
+                    GFXSTREAM_WARNING(
+                        "Skipping vkCmdCopyBuffer with invalid buffer (src=%p, dst=%p)", srcBuffer,
+                        dstBuffer);
+                }
+                if (CC_LIKELY(vk) && validCopyBuffers) {
                     vk->vkCmdCopyBuffer(unboxed_commandBuffer, srcBuffer, dstBuffer, regionCount,
                                         pRegions);
                 }
                 vkStream->unsetHandleMapping();
-                if (m_snapshotsEnabled) {
+                if (m_snapshotsEnabled && validCopyBuffers) {
                     m_state->snapshot()->vkCmdCopyBuffer(&m_pool, snapshotApiCallHandle, packet,
                                                          packetLen, commandBuffer, srcBuffer,
                                                          dstBuffer, regionCount, pRegions);

@@ -138,11 +138,11 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
                 uint64_t cgen_var_0;
                 memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
                 *readStreamPtrPtr += 1 * 8;
-                *(VkBuffer*)&srcBuffer = (VkBuffer)unbox_VkBuffer((VkBuffer)(*&cgen_var_0));
+                *(VkBuffer*)&srcBuffer = (VkBuffer)try_unbox_VkBuffer((VkBuffer)(*&cgen_var_0));
                 uint64_t cgen_var_1;
                 memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
                 *readStreamPtrPtr += 1 * 8;
-                *(VkBuffer*)&dstBuffer = (VkBuffer)unbox_VkBuffer((VkBuffer)(*&cgen_var_1));
+                *(VkBuffer*)&dstBuffer = (VkBuffer)try_unbox_VkBuffer((VkBuffer)(*&cgen_var_1));
                 memcpy((uint32_t*)&regionCount, *readStreamPtrPtr, sizeof(uint32_t));
                 *readStreamPtrPtr += sizeof(uint32_t);
                 if (regionCount <= MAX_STACK_ITEMS) {
@@ -159,11 +159,18 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
                         transform_tohost_VkBufferCopy(globalstate, (VkBufferCopy*)(pRegions + i));
                     }
                 }
-                if (CC_LIKELY(vk)) {
+                const bool validCopyBuffers =
+                    srcBuffer != VK_NULL_HANDLE && dstBuffer != VK_NULL_HANDLE;
+                if (!validCopyBuffers) {
+                    GFXSTREAM_WARNING(
+                        "Skipping vkCmdCopyBuffer with invalid buffer (src=%p, dst=%p)", srcBuffer,
+                        dstBuffer);
+                }
+                if (CC_LIKELY(vk) && validCopyBuffers) {
                     vk->vkCmdCopyBuffer((VkCommandBuffer)dispatchHandle, srcBuffer, dstBuffer,
                                         regionCount, pRegions);
                 }
-                if (snapshotsEnabled()) {
+                if (snapshotsEnabled() && validCopyBuffers) {
                     this->snapshot()->vkCmdCopyBuffer(pool, snapshotApiCallHandle, nullptr, 0,
                                                       (VkCommandBuffer)(boxed_dispatchHandle),
                                                       srcBuffer, dstBuffer, regionCount, pRegions);
