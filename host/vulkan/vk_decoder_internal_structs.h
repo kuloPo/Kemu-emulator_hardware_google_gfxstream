@@ -572,8 +572,14 @@ struct PipelineInfo {
     VkDevice device;
 };
 
+struct AttachmentClear {
+    uint32_t attachment;
+    VkImageAspectFlags aspects;
+};
+
 struct RenderPassInfo {
     VkDevice device;
+    std::vector<AttachmentClear> forcedClears;
 };
 
 struct FramebufferInfo {

@@ -35,6 +35,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -93,6 +94,129 @@ using gfxstream::base::SharedMemory;
 using gfxstream::base::StaticLock;
 using gfxstream::base::UdmabufCreator;
 using gfxstream::host::GfxApiLogger;
+
+static VkImageAspectFlags clearableAspects(VkImageLayout layout) {
+    constexpr auto all =
+        VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+        case VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL:
+            return 0;
+        case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL:
+            return all & ~VK_IMAGE_ASPECT_DEPTH_BIT;
+        case VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL:
+            return all & ~VK_IMAGE_ASPECT_STENCIL_BIT;
+        default:
+            return all;
+    }
+}
+
+static VkImageAspectFlags clearableAspects(const VkAttachmentReference& reference) {
+    return clearableAspects(reference.layout);
+}
+
+static VkImageAspectFlags clearableAspects(const VkAttachmentReference2& reference) {
+    auto aspects = clearableAspects(reference.layout);
+    if (const auto* stencil = vk_find_struct<VkAttachmentReferenceStencilLayout>(&reference)) {
+        aspects = (aspects & ~VK_IMAGE_ASPECT_STENCIL_BIT) |
+                  (clearableAspects(stencil->stencilLayout) & VK_IMAGE_ASPECT_STENCIL_BIT);
+    }
+    return aspects;
+}
+
+template <typename CreateInfo>
+static VkImageAspectFlags clearableAttachmentAspects(const CreateInfo& info, uint32_t attachment) {
+    for (uint32_t i = 0; i < info.subpassCount; ++i) {
+        const auto& subpass = info.pSubpasses[i];
+        bool used = false;
+        bool output = false;
+        auto aspects = getFormatAspects(info.pAttachments[attachment].format);
+        const auto visit = [&](const auto* references, uint32_t count, bool isOutput) {
+            if (!references) return;
+            for (uint32_t j = 0; j < count; ++j) {
+                if (references[j].attachment != attachment) continue;
+                used = true;
+                output |= isOutput;
+                aspects &= clearableAspects(references[j]);
+            }
+        };
+        visit(subpass.pInputAttachments, subpass.inputAttachmentCount, false);
+        visit(subpass.pColorAttachments, subpass.colorAttachmentCount, true);
+        visit(subpass.pResolveAttachments, subpass.colorAttachmentCount, true);
+        visit(subpass.pDepthStencilAttachment, 1, true);
+        // Load clears must be legal at the first use, including input-only attachments.
+        if (used) return output ? aspects : 0;
+    }
+    return 0;
+}
+
+static bool normalizeAttachmentOps(VkAttachmentLoadOp& load, VkAttachmentStoreOp& store,
+                                   bool canClear) {
+    // Preserve stored results and initialize discarded loads consistently for all guests.
+    if (store == VK_ATTACHMENT_STORE_OP_DONT_CARE) store = VK_ATTACHMENT_STORE_OP_STORE;
+    if (load != VK_ATTACHMENT_LOAD_OP_DONT_CARE || !canClear) return false;
+    load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    return true;
+}
+
+template <typename CreateInfo, typename Attachment>
+static bool normalizeRenderPassAttachments(const CreateInfo& info,
+                                           std::vector<Attachment>& attachments,
+                                           std::vector<AttachmentClear>& forcedClears) {
+    for (uint32_t i = 0; i < info.attachmentCount; ++i) {
+        const auto& source = info.pAttachments[i];
+        auto adjusted = source;
+        const auto aspects = getFormatAspects(source.format);
+        const auto clearable = clearableAttachmentAspects(info, i);
+        VkImageAspectFlags cleared = 0;
+        if (aspects & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            if (normalizeAttachmentOps(adjusted.loadOp, adjusted.storeOp,
+                                       clearable & ~VK_IMAGE_ASPECT_STENCIL_BIT)) {
+                cleared |= aspects & ~VK_IMAGE_ASPECT_STENCIL_BIT;
+            }
+        }
+        if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
+            if (normalizeAttachmentOps(adjusted.stencilLoadOp, adjusted.stencilStoreOp,
+                                       clearable & VK_IMAGE_ASPECT_STENCIL_BIT)) {
+                cleared |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            }
+        }
+        if (cleared) forcedClears.push_back({i, cleared});
+        if (adjusted.loadOp == source.loadOp && adjusted.storeOp == source.storeOp &&
+            adjusted.stencilLoadOp == source.stencilLoadOp &&
+            adjusted.stencilStoreOp == source.stencilStoreOp)
+            continue;
+        if (attachments.empty()) {
+            attachments.assign(info.pAttachments, info.pAttachments + info.attachmentCount);
+        }
+        attachments[i] = adjusted;
+    }
+    return !attachments.empty();
+}
+
+static void setDefaultClearValue(VkImageAspectFlags aspects, VkClearValue& value) {
+    if (aspects & VK_IMAGE_ASPECT_COLOR_BIT) value.color = {};
+    if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT) value.depthStencil.depth = 1.0f;
+    if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) value.depthStencil.stencil = 0;
+}
+
+static void prepareRenderPassClearValues(const std::vector<AttachmentClear>& forcedClears,
+                                         VkRenderPassBeginInfo& begin,
+                                         std::vector<VkClearValue>& values) {
+    if (forcedClears.empty()) return;
+    if (begin.clearValueCount) {
+        values.assign(begin.pClearValues, begin.pClearValues + begin.clearValueCount);
+    }
+    values.resize(std::max(begin.clearValueCount, forcedClears.back().attachment + 1));
+    for (const auto& clear : forcedClears) {
+        setDefaultClearValue(clear.aspects, values[clear.attachment]);
+    }
+    begin.clearValueCount = static_cast<uint32_t>(values.size());
+    begin.pClearValues = values.data();
+}
 
 // Blob mem
 #define STREAM_BLOB_MEM_GUEST 1
@@ -8698,16 +8822,21 @@ class VkDecoderGlobalState::Impl {
         }
 
         std::vector<VkAttachmentDescription> attachments;
+        std::vector<AttachmentClear> forcedClears;
+        const bool adjustedOps =
+            normalizeRenderPassAttachments(*pCreateInfo, attachments, forcedClears);
         std::vector<VkSubpassDescription> subpasses;
         // Pointers for subpass attachments to keep them alive until the vkCreateRenderPass call
         std::vector<std::vector<VkAttachmentReference>> inputAttachments;
         std::vector<std::vector<VkAttachmentReference>> colorAttachments;
         std::vector<std::vector<VkAttachmentReference>> resolveAttachments;
 
-        if (needReformat || m_vkEmulation->needsImageLayoutAdjustment()) {
+        if (needReformat || m_vkEmulation->needsImageLayoutAdjustment() || adjustedOps) {
             createInfo = *pCreateInfo;
-            attachments.assign(pCreateInfo->pAttachments,
-                               pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
+            if (!adjustedOps && pCreateInfo->attachmentCount) {
+                attachments.assign(pCreateInfo->pAttachments,
+                                   pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
+            }
             for (auto& attachment : attachments) {
                 if (needReformat && deviceInfo->needEmulatedDecompression(attachment.format)) {
                     attachment.format = CompressedImageInfo::getOutputFormat(attachment.format);
@@ -8768,6 +8897,7 @@ class VkDecoderGlobalState::Impl {
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mRenderPassInfo, *pRenderPass);
         auto& renderPassInfo = mRenderPassInfo[*pRenderPass];
         renderPassInfo.device = device;
+        renderPassInfo.forcedClears = std::move(forcedClears);
 
         *pRenderPass = new_boxed_non_dispatchable_VkRenderPass(*pRenderPass);
 
@@ -8784,15 +8914,20 @@ class VkDecoderGlobalState::Impl {
         std::lock_guard<std::mutex> lock(mMutex);
 
         std::vector<VkAttachmentDescription2> attachments;
+        std::vector<AttachmentClear> forcedClears;
+        const bool adjustedOps =
+            normalizeRenderPassAttachments(*pCreateInfo, attachments, forcedClears);
         std::vector<VkSubpassDescription2> subpasses;
         std::vector<std::vector<VkAttachmentReference2>> inputAttachments;
         std::vector<std::vector<VkAttachmentReference2>> colorAttachments;
         std::vector<std::vector<VkAttachmentReference2>> resolveAttachments;
 
-        if (m_vkEmulation->needsImageLayoutAdjustment()) {
+        if (m_vkEmulation->needsImageLayoutAdjustment() || adjustedOps) {
             createInfo = *pCreateInfo;
-            attachments.assign(pCreateInfo->pAttachments,
-                               pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
+            if (!adjustedOps && pCreateInfo->attachmentCount) {
+                attachments.assign(pCreateInfo->pAttachments,
+                                   pCreateInfo->pAttachments + pCreateInfo->attachmentCount);
+            }
             for (auto& attachment : attachments) {
                 attachment.initialLayout =
                     m_vkEmulation->adjustImageLayout(attachment.initialLayout);
@@ -8848,6 +8983,7 @@ class VkDecoderGlobalState::Impl {
         VALIDATE_NEW_HANDLE_INFO_ENTRY(mRenderPassInfo, *pRenderPass);
         auto& renderPassInfo = mRenderPassInfo[*pRenderPass];
         renderPassInfo.device = device;
+        renderPassInfo.forcedClears = std::move(forcedClears);
 
         *pRenderPass = new_boxed_non_dispatchable_VkRenderPass(*pRenderPass);
 
@@ -8882,7 +9018,9 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool registerRenderPassBeginInfo(VkCommandBuffer commandBuffer,
-                                     const VkRenderPassBeginInfo* pRenderPassBegin) {
+                                     const VkRenderPassBeginInfo* pRenderPassBegin,
+                                     VkRenderPassBeginInfo& adjustedBegin,
+                                     std::vector<VkClearValue>& clearValues) {
         if (!pRenderPassBegin) {
             GFXSTREAM_ERROR("pRenderPassBegin is null");
             return false;
@@ -8905,6 +9043,12 @@ class VkDecoderGlobalState::Impl {
 
         cmdBufferInfo->releasedColorBuffers.insert(fbInfo->attachedColorBuffers.begin(),
                                                    fbInfo->attachedColorBuffers.end());
+        adjustedBegin = *pRenderPassBegin;
+        const auto* renderPassInfo =
+            gfxstream::base::find(mRenderPassInfo, pRenderPassBegin->renderPass);
+        if (renderPassInfo) {
+            prepareRenderPassClearValues(renderPassInfo->forcedClears, adjustedBegin, clearValues);
+        }
         return true;
     }
 
@@ -8914,8 +9058,10 @@ class VkDecoderGlobalState::Impl {
                                  VkSubpassContents contents) {
         auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
         auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
-        if (registerRenderPassBeginInfo(commandBuffer, pRenderPassBegin)) {
-            vk->vkCmdBeginRenderPass(commandBuffer, pRenderPassBegin, contents);
+        VkRenderPassBeginInfo adjustedBegin;
+        std::vector<VkClearValue> clearValues;
+        if (registerRenderPassBeginInfo(commandBuffer, pRenderPassBegin, adjustedBegin, clearValues)) {
+            vk->vkCmdBeginRenderPass(commandBuffer, &adjustedBegin, contents);
         }
     }
 
@@ -8925,8 +9071,10 @@ class VkDecoderGlobalState::Impl {
                                   const VkSubpassBeginInfo* pSubpassBeginInfo) {
         auto commandBuffer = unbox_VkCommandBuffer(boxed_commandBuffer);
         auto vk = dispatch_VkCommandBuffer(boxed_commandBuffer);
-        if (registerRenderPassBeginInfo(commandBuffer, pRenderPassBegin)) {
-            vk->vkCmdBeginRenderPass2(commandBuffer, pRenderPassBegin, pSubpassBeginInfo);
+        VkRenderPassBeginInfo adjustedBegin;
+        std::vector<VkClearValue> clearValues;
+        if (registerRenderPassBeginInfo(commandBuffer, pRenderPassBegin, adjustedBegin, clearValues)) {
+            vk->vkCmdBeginRenderPass2(commandBuffer, &adjustedBegin, pSubpassBeginInfo);
         }
     }
 
