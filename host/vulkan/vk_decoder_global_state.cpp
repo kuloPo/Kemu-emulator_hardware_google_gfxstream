@@ -2448,7 +2448,8 @@ class VkDecoderGlobalState::Impl {
         }
 #endif
 
-        // Filter device memory report as callbacks can not be passed between guest and host.
+        // Device memory reporting is implemented in the guest, including its callbacks.
+        vk_struct_chain_filter<VkPhysicalDeviceDeviceMemoryReportFeaturesEXT>(&createInfoFiltered);
         vk_struct_chain_filter<VkDeviceDeviceMemoryReportCreateInfoEXT>(&createInfoFiltered);
 
         // Filter device groups as they are effectively disabled.

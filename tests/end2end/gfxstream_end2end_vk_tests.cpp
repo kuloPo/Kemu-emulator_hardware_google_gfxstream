@@ -1927,14 +1927,21 @@ TEST_P(GfxstreamEnd2EndVkTest, DeviceMemoryReport) {
         .pfnUserCallback = &MemoryReportCallback,
         .pUserData = &userdata,
     };
+    vkhpp::PhysicalDeviceDeviceMemoryReportFeaturesEXT deviceMemoryReportFeatures = {
+        .pNext = &deviceDeviceMemoryReportInfo,
+        .deviceMemoryReport = VK_TRUE,
+    };
 
     auto [instance, physicalDevice, device, queue, queueFamilyIndex] =
         GFXSTREAM_ASSERT(SetUpTypicalVkTestEnvironment({
             .deviceExtensions = {{
                 VK_EXT_DEVICE_MEMORY_REPORT_EXTENSION_NAME,
             }},
-            .deviceCreateInfoPNext = &deviceDeviceMemoryReportInfo,
+            .deviceCreateInfoPNext = &deviceMemoryReportFeatures,
         }));
+
+    EXPECT_EQ(deviceMemoryReportFeatures.deviceMemoryReport, VK_TRUE);
+    EXPECT_EQ(deviceMemoryReportFeatures.pNext, &deviceDeviceMemoryReportInfo);
 
     const vkhpp::MemoryAllocateInfo memoryAllocateInfo = {
         .allocationSize = 1024,
