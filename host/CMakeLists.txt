@@ -371,6 +371,7 @@ endfunction()
             Vulkan_integrationtests
             vulkan/testing/VkDecoderTestDispatch.h
             vulkan/testing/VulkanTestHelper.cpp
+            vulkan/emulated_textures/testing/MesaAstc_integrationtest.cpp
     )
     target_link_libraries(
             Vulkan_integrationtests

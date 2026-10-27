@@ -204,42 +204,91 @@ constexpr bool isEtc2(VkFormat format) {
     }
 }
 
-// Note: this only returns true for ASTC LDR, not HDR.
-// TODO(gregschlom): Revisit our ASTC-related names if we decide to support HDR to make sure we
-//   clearly distinguish between the two modes.
+constexpr bool isAstcHdr(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_5x4_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_5x5_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_6x5_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_6x6_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_8x5_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_8x6_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_8x8_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_10x5_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_10x6_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_10x8_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_12x10_SFLOAT_BLOCK:
+        case VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK:
+            return true;
+        default: return false;
+    }
+}
+
 constexpr bool isAstc(VkFormat format) {
+    return (format >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+            format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) || isAstcHdr(format);
+}
+
+constexpr VkExtent2D astcBlockSize(VkFormat format) {
     switch (format) {
         case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
         case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK:
+            return {4, 4};
         case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
         case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_5x4_SFLOAT_BLOCK:
+            return {5, 4};
         case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
         case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_5x5_SFLOAT_BLOCK:
+            return {5, 5};
         case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
         case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_6x5_SFLOAT_BLOCK:
+            return {6, 5};
         case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
         case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_6x6_SFLOAT_BLOCK:
+            return {6, 6};
         case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
         case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_8x5_SFLOAT_BLOCK:
+            return {8, 5};
         case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
         case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_8x6_SFLOAT_BLOCK:
+            return {8, 6};
         case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
         case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_8x8_SFLOAT_BLOCK:
+            return {8, 8};
         case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
         case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x5_SFLOAT_BLOCK:
+            return {10, 5};
         case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
         case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x6_SFLOAT_BLOCK:
+            return {10, 6};
         case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
         case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x8_SFLOAT_BLOCK:
+            return {10, 8};
         case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
         case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK:
+            return {10, 10};
         case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
         case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_12x10_SFLOAT_BLOCK:
+            return {12, 10};
         case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
         case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-            return true;
-        default:
-            return false;
+        case VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK:
+            return {12, 12};
+        default: return {1, 1};
     }
 }
 

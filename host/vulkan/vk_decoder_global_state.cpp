@@ -1743,6 +1743,15 @@ class VkDecoderGlobalState::Impl {
         pFeatures->features.textureCompressionETC2 |= enableEmulatedEtc2();
         pFeatures->features.textureCompressionASTC_LDR |= enableEmulatedAstc();
 
+        if (enableEmulatedAstc()) {
+            if (auto* hdr = vk_find_struct<VkPhysicalDeviceTextureCompressionASTCHDRFeatures>(pFeatures)) {
+                hdr->textureCompressionASTC_HDR = VK_TRUE;
+            }
+            if (auto* features13 = vk_find_struct<VkPhysicalDeviceVulkan13Features>(pFeatures)) {
+                features13->textureCompressionASTC_HDR = VK_TRUE;
+            }
+        }
+
         VkPhysicalDeviceSamplerYcbcrConversionFeatures* ycbcrFeatures =
             vk_find_struct<VkPhysicalDeviceSamplerYcbcrConversionFeatures>(pFeatures);
         if (ycbcrFeatures != nullptr) {
@@ -2222,7 +2231,8 @@ class VkDecoderGlobalState::Impl {
         auto physicalDevice = unbox_VkPhysicalDevice(boxed_physicalDevice);
         auto vk = dispatch_VkPhysicalDevice(boxed_physicalDevice);
 
-        bool shouldPassthrough = !m_vkEmulation->isYcbcrEmulationEnabled();
+        bool shouldPassthrough = !m_vkEmulation->isYcbcrEmulationEnabled() &&
+                                 !enableEmulatedAstc();
 #if defined(__APPLE__)
         shouldPassthrough = shouldPassthrough && !(m_vkEmulation->getExternalMemoryMode() ==
                                                    ExternalMemory::Mode::Metal);
@@ -2265,6 +2275,12 @@ class VkDecoderGlobalState::Impl {
             properties.push_back(mvk_props);
         }
 #endif
+
+        if (!pLayerName && enableEmulatedAstc() &&
+            !hasDeviceExtension(properties, VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME)) {
+            properties.push_back({VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME,
+                                  VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_SPEC_VERSION});
+        }
 
         if (m_vkEmulation->isYcbcrEmulationEnabled() &&
             !hasDeviceExtension(properties, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME)) {
@@ -2486,6 +2502,17 @@ class VkDecoderGlobalState::Impl {
             }
         }
 
+        if (emulateTextureAstc) {
+            if (auto* hdr = vk_find_struct<VkPhysicalDeviceTextureCompressionASTCHDRFeatures>(
+                    &createInfoFiltered)) {
+                hdr->textureCompressionASTC_HDR = VK_FALSE;
+            }
+            if (auto* features13 = vk_find_struct<VkPhysicalDeviceVulkan13Features>(
+                    &createInfoFiltered)) {
+                features13->textureCompressionASTC_HDR = VK_FALSE;
+            }
+        }
+
         if (auto* ycbcrFeatures = vk_find_struct<VkPhysicalDeviceSamplerYcbcrConversionFeatures>(
                 &createInfoFiltered)) {
             if (m_vkEmulation->isYcbcrEmulationEnabled() &&
@@ -2643,11 +2670,9 @@ class VkDecoderGlobalState::Impl {
         deviceInfo.emulateTextureEtc2 = emulateTextureEtc2;
         deviceInfo.emulateTextureAstc = emulateTextureAstc;
         deviceInfo.emulateProtectedMemory = emulateProtectedMemory;
-        deviceInfo.useAstcCpuDecompression =
-            m_vkEmulation->getAstcLdrEmulationMode() == AstcEmulationMode::Cpu &&
-            AstcCpuDecompressor::get().available();
+        deviceInfo.useAstcCpuDecompression = false;
         deviceInfo.decompPipelines =
-            std::make_unique<GpuDecompressionPipelineManager>(m_vk, *pDevice);
+            std::make_unique<GpuDecompressionPipelineManager>(m_vk, *pDevice, physicalDevice);
         getSupportedFenceHandleTypes(vk, physicalDevice, &supportedFenceHandleTypes);
         getSupportedSemaphoreHandleTypes(vk, physicalDevice, &supportedBinarySemaphoreHandleTypes);
 
@@ -2976,7 +3001,7 @@ class VkDecoderGlobalState::Impl {
         CompressedImageInfo cmpInfo =
             CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
         {
-            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo);
+            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo, pool);
             VkImage tempImage;
             VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
             if (createRes != VK_SUCCESS) {
@@ -3320,7 +3345,7 @@ class VkDecoderGlobalState::Impl {
         if (needDecompression) {
             cmpInfo = std::make_unique<CompressedImageInfo>(device, *pCreateInfo,
                                                             deviceInfo->decompPipelines.get());
-            decompInfo = cmpInfo->getOutputCreateInfo(*pCreateInfo);
+            decompInfo = cmpInfo->getOutputCreateInfo(*pCreateInfo, pool);
             pCreateInfo = &decompInfo;
         }
 
@@ -10348,6 +10373,8 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool isEmulatedDeviceExtension(const char* name) const {
+        if (enableEmulatedAstc() &&
+            !strcmp(name, VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME)) return true;
         for (auto emulatedExt : kEmulatedDeviceExtensions) {
             if (!strcmp(emulatedExt, name)) return true;
         }
@@ -10544,6 +10571,9 @@ class VkDecoderGlobalState::Impl {
     }
 
     bool needEmulatedAstc(VkPhysicalDevice physicalDevice, VulkanDispatch* vk) EXCLUDES(mMutex) {
+        if (GpuDecompressionPipelineManager::astcDecoder() == AstcDecoder::Mesa) {
+            return enableEmulatedAstc();
+        }
         if (!enableEmulatedAstc()) {
             return false;
         }

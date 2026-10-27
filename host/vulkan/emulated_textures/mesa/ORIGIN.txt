@@ -1,0 +1,21 @@
+Mesa ASTC GPU decoder
+=====================
+
+Source: Mesa 26.2.0-devel, local pinned source snapshot.
+Upstream: https://gitlab.freedesktop.org/mesa/mesa
+
+src/compiler/glsl/astc_decoder.glsl
+SHA256: 889426af6f0cc0827dd496b08ce0a7320abdd5345417d6ee485e57b8ab010587
+
+src/util/texcompress_astc_luts.cpp
+SHA256: 94022912f1d889f9ac872fb4411aba1a48351b3ce9548fb1ef0c1a2f92955b7d
+
+src/util/texcompress_astc_luts.h
+SHA256: a22ac9301f42cce65fc0c90bdeb6016965d965a857fd287e83ed6d71b8069d5a
+
+The MIT license is retained in each source file.
+Local shader adaptation: typed storage images, base array layer,
+LDR/HDR output variants, block dimensions in push constants, and
+profile-specific error texels. Workgroup dimensions remain specialized.
+The LUT header additionally includes cstddef and cstdint.
+LUT construction does not decode textures; all texture decoding runs on the GPU.

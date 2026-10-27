@@ -25,6 +25,10 @@
 #include "emulated_textures/gpu_decompression_pipeline.h"
 #include "goldfish_vk_dispatch.h"
 
+namespace gfxstream::base {
+class BumpPool;
+}
+
 namespace gfxstream {
 namespace host {
 namespace vk {
@@ -65,7 +69,8 @@ class CompressedImageInfo {
     // Public methods
 
     // Returns the VkImageCreateInfo needed to create the output image
-    VkImageCreateInfo getOutputCreateInfo(const VkImageCreateInfo& createInfo) const;
+    VkImageCreateInfo getOutputCreateInfo(const VkImageCreateInfo& createInfo,
+                                        gfxstream::base::BumpPool* pool) const;
 
     // Creates the compressed mipmap images, that is the VkImages holding the compressed data
     void createCompressedMipmapImages(VulkanDispatch* vk, const VkImageCreateInfo& createInfo);

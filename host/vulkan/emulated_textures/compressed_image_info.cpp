@@ -19,7 +19,9 @@
 #include "emulated_textures/shaders/decompression_shaders.h"
 #include "gfxstream/ArraySize.h"
 #include "gfxstream/common/logging.h"
+#include "goldfish_vk_deepcopy.h"
 #include "vk_format_utils.h"
+#include "vk_utils.h"
 
 namespace gfxstream {
 namespace host {
@@ -32,7 +34,7 @@ inline constexpr uint32_t ceil_div(uint32_t x, uint32_t y) { return (x + y - 1) 
 
 VkImageView createDefaultImageView(VulkanDispatch* vk, VkDevice device, VkImage image,
                                    VkFormat format, VkImageType imageType, uint32_t mipLevel,
-                                   uint32_t layerCount) {
+                                   uint32_t layerCount, uint32_t baseLayer = 0) {
     VkImageViewCreateInfo imageViewInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = image,
@@ -44,7 +46,7 @@ VkImageView createDefaultImageView(VulkanDispatch* vk, VkDevice device, VkImage 
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = mipLevel,
                 .levelCount = 1,
-                .baseArrayLayer = 0,
+                .baseArrayLayer = baseLayer,
                 .layerCount = layerCount,
             },
     };
@@ -73,6 +75,7 @@ VkImageView createDefaultImageView(VulkanDispatch* vk, VkDevice device, VkImage 
 }
 
 VkExtent2D getBlockSize(VkFormat format) {
+    if (isAstc(format)) return astcBlockSize(format);
     switch (format) {
         case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
         case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
@@ -85,48 +88,6 @@ VkExtent2D getBlockSize(VkFormat format) {
         case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
         case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
             return {4, 4};
-        case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
-            return {4, 4};
-        case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
-            return {5, 4};
-        case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
-            return {5, 5};
-        case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
-            return {6, 5};
-        case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
-            return {6, 6};
-        case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
-            return {8, 5};
-        case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
-            return {8, 6};
-        case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
-            return {8, 8};
-        case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
-            return {10, 5};
-        case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
-            return {10, 6};
-        case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
-            return {10, 8};
-        case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
-            return {10, 10};
-        case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
-            return {12, 10};
-        case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
-        case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
-            return {12, 12};
         default:
             return {1, 1};
     }
@@ -186,6 +147,7 @@ bool isCompressedFormat(VkFormat format) {
 
 // Returns the format that the shader uses to write the output image
 VkFormat getShaderFormat(VkFormat outputFormat) {
+    if (outputFormat == VK_FORMAT_R16G16B16A16_SFLOAT) return VK_FORMAT_R16G16B16A16_UINT;
     switch (outputFormat) {
         case VK_FORMAT_R16_UNORM:
         case VK_FORMAT_R16_SNORM:
@@ -241,6 +203,7 @@ CompressedImageInfo::CompressedImageInfo(VkDevice device, const VkImageCreateInf
 
 // static
 VkFormat CompressedImageInfo::getOutputFormat(VkFormat compFmt) {
+    if (isAstcHdr(compFmt)) return VK_FORMAT_R16G16B16A16_SFLOAT;
     switch (compFmt) {
         case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
         case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
@@ -299,6 +262,7 @@ VkFormat CompressedImageInfo::getOutputFormat(VkFormat compFmt) {
 
 // static
 VkFormat CompressedImageInfo::getCompressedMipmapsFormat(VkFormat compFmt) {
+    if (isAstcHdr(compFmt)) return VK_FORMAT_R32G32B32A32_UINT;
     switch (compFmt) {
         case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
         case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
@@ -366,8 +330,15 @@ bool CompressedImageInfo::isAstc() const {
 }
 
 VkImageCreateInfo CompressedImageInfo::getOutputCreateInfo(
-    const VkImageCreateInfo& createInfo) const {
-    VkImageCreateInfo result = createInfo;
+    const VkImageCreateInfo& createInfo, gfxstream::base::BumpPool* pool) const {
+    VkImageCreateInfo result;
+    deepcopy_VkImageCreateInfo(pool, VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &createInfo, &result);
+    // Guest ASTC view formats do not describe the decoded or payload images. Allow
+    // compatible host views, including the integer view used by the compute shader.
+    if (auto* formats = vk_find_struct<VkImageFormatListCreateInfo>(&result)) {
+        formats->viewFormatCount = 0;
+        formats->pViewFormats = nullptr;
+    }
     result.format = mOutputFormat;
 
     result.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
@@ -401,7 +372,8 @@ void CompressedImageInfo::createCompressedMipmapImages(VulkanDispatch* vk,
     // on_vkGetPhysicalDeviceImageFormatProperties in VkDecoderGlobalState
     // TODO(gregschlom): Remove duplicated logic.
     createInfoCopy.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-    createInfoCopy.flags &= ~VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT;
+    createInfoCopy.flags &= ~(VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT |
+                              VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT);
     createInfoCopy.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     createInfoCopy.mipLevels = 1;
 
@@ -664,16 +636,20 @@ VkResult CompressedImageInfo::initializeDecompressionPipeline(VulkanDispatch* vk
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
-    VkDescriptorPoolSize poolSize = {
-        .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = 2 * mMipLevels,
+    const bool mesaAstc = isAstc() &&
+                          GpuDecompressionPipelineManager::astcDecoder() == AstcDecoder::Mesa;
+    const uint32_t viewLayers = mesaAstc ? mLayerCount : 1;
+    const uint32_t descriptorCount = mMipLevels * viewLayers;
+    const VkDescriptorPoolSize poolSizes[] = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * descriptorCount},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 6 * descriptorCount},
     };
     VkDescriptorPoolCreateInfo dsPoolInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-        .maxSets = mMipLevels,
-        .poolSizeCount = 1,
-        .pPoolSizes = &poolSize,
+        .maxSets = descriptorCount,
+        .poolSizeCount = mesaAstc ? 2u : 1u,
+        .pPoolSizes = poolSizes,
     };
     VkResult result =
         vk->vkCreateDescriptorPool(device, &dsPoolInfo, nullptr, &mDecompDescriptorPool);
@@ -682,15 +658,15 @@ VkResult CompressedImageInfo::initializeDecompressionPipeline(VulkanDispatch* vk
         return result;
     }
 
-    std::vector<VkDescriptorSetLayout> layouts(mMipLevels, mDecompPipeline->descriptorSetLayout());
+    std::vector<VkDescriptorSetLayout> layouts(descriptorCount, mDecompPipeline->descriptorSetLayout());
 
     VkDescriptorSetAllocateInfo dsInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool = mDecompDescriptorPool,
-        .descriptorSetCount = mMipLevels,
+        .descriptorSetCount = descriptorCount,
         .pSetLayouts = layouts.data(),
     };
-    mDecompDescriptorSets.resize(mMipLevels);
+    mDecompDescriptorSets.resize(descriptorCount);
     result = vk->vkAllocateDescriptorSets(device, &dsInfo, mDecompDescriptorSets.data());
     if (result != VK_SUCCESS) {
         GFXSTREAM_ERROR("GPU decompression error. vkAllocateDescriptorSets failed: %d", result);
@@ -698,8 +674,8 @@ VkResult CompressedImageInfo::initializeDecompressionPipeline(VulkanDispatch* vk
     }
 
     VkFormat shaderFormat = getShaderFormat(mOutputFormat);
-    mCompressedMipmapsImageViews.resize(mMipLevels);
-    mOutputImageViews.resize(mMipLevels);
+    mCompressedMipmapsImageViews.resize(descriptorCount);
+    mOutputImageViews.resize(descriptorCount);
 
     VkDescriptorImageInfo compressedMipmapsDescriptorImageInfo = {.imageLayout =
                                                                       VK_IMAGE_LAYOUT_GENERAL};
@@ -720,12 +696,20 @@ VkResult CompressedImageInfo::initializeDecompressionPipeline(VulkanDispatch* vk
             .pImageInfo = &mDecompDescriptorImageInfo,
         }};
 
-    for (uint32_t i = 0; i < mMipLevels; i++) {
+    // A view must not expose layers whose layouts differ from this dispatch's layout.
+    for (uint32_t i = 0; i < descriptorCount; i++) {
+        const uint32_t mip = i / viewLayers;
+        const uint32_t layer = i % viewLayers;
+        const uint32_t layers = mesaAstc ? 1 : mLayerCount;
         mCompressedMipmapsImageViews[i] =
-            createDefaultImageView(vk, device, mCompressedMipmaps[i], mCompressedMipmapsFormat,
-                                   mImageType, 0, mLayerCount);
+            createDefaultImageView(vk, device, mCompressedMipmaps[mip], mCompressedMipmapsFormat,
+                                   mImageType, 0, layers, layer);
         mOutputImageViews[i] = createDefaultImageView(vk, device, mOutputImage, shaderFormat,
-                                                      mImageType, i, mLayerCount);
+                                                      mImageType, mip, layers, layer);
+        if (!mCompressedMipmapsImageViews[i] || !mOutputImageViews[i]) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        if (mesaAstc) mPipelineManager->writeAstcDescriptors(mDecompDescriptorSets[i], mCompressedFormat);
         compressedMipmapsDescriptorImageInfo.imageView = mCompressedMipmapsImageViews[i];
         mDecompDescriptorImageInfo.imageView = mOutputImageViews[i];
         writeDescriptorSets[0].dstSet = mDecompDescriptorSets[i];
@@ -741,6 +725,27 @@ void CompressedImageInfo::decompress(VulkanDispatch* vk, VkCommandBuffer command
                                      const VkImageSubresourceRange& range) {
     vk->vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                           mDecompPipeline->pipeline());
+    if (isAstc() && GpuDecompressionPipelineManager::astcDecoder() == AstcDecoder::Mesa) {
+        for (uint32_t mip = range.baseMipLevel; mip < range.baseMipLevel + range.levelCount; ++mip) {
+            const auto extent = mipmapExtent(mip);
+            const MesaAstcPushConstant constants = {
+                {0, 0}, {static_cast<int32_t>(extent.width), static_cast<int32_t>(extent.height)},
+                0, mBlock.width, mBlock.height,
+            };
+            vk->vkCmdPushConstants(commandBuffer, mDecompPipeline->pipelineLayout(),
+                                   VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), &constants);
+            for (uint32_t layer = range.baseArrayLayer;
+                 layer < range.baseArrayLayer + range.layerCount; ++layer) {
+                vk->vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                           mDecompPipeline->pipelineLayout(), 0, 1,
+                                           &mDecompDescriptorSets[mip * mLayerCount + layer], 0, nullptr);
+                vk->vkCmdDispatch(commandBuffer, ceil_div(extent.width, 2 * mBlock.width),
+                                  ceil_div(extent.height, 2 * mBlock.height),
+                                  mImageType == VK_IMAGE_TYPE_3D ? extent.depth : 1);
+            }
+        }
+        return;
+    }
     uint32_t dispatchZ = mExtent.depth == 1 ? range.layerCount : mExtent.depth;
     bool perPixel = false;  // Whether the shader operates per compressed block or per pixel
     if (isEtc2()) {
@@ -805,10 +810,7 @@ VkExtent3D CompressedImageInfo::compressedMipmapPortion(const VkExtent3D& origEx
     return {
         .width = std::min(ceil_div(origExtent.width, mBlock.width), maxExtent.width),
         .height = std::min(ceil_div(origExtent.height, mBlock.height), maxExtent.height),
-        // TODO(gregschlom): this is correct for 2DArrays, but incorrect for 3D images. We should
-        // take the image type into account to do the right thing here. See also
-        // https://android-review.googlesource.com/c/device/generic/vulkan-cereal/+/2458549/comment/cfc7480f_912dd378/
-        .depth = origExtent.depth,
+        .depth = std::min(origExtent.depth, maxExtent.depth),
     };
 }
 

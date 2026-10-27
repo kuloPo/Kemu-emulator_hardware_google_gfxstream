@@ -15,6 +15,7 @@
 #include "gpu_decompression_pipeline.h"
 
 #include <vulkan/vk_enum_string_helper.h>
+#include <vector>
 
 #include "emulated_textures/shaders/decompression_shaders.h"
 #include "gfxstream/common/logging.h"
@@ -25,10 +26,7 @@ namespace host {
 namespace vk {
 namespace {
 
-// Which GPU decoder we use for ASTC textures.
-// Note: we currently only enable ASTC decompression for native vulkan apps, and we try CPU
-// decompression first, before falling back to GPU decompression.
-static AstcDecoder activeAstcDecoder = AstcDecoder::NewRgb;
+static AstcDecoder activeAstcDecoder = AstcDecoder::Mesa;
 
 struct ShaderGroup {
     ShaderData shader1D;
@@ -58,6 +56,23 @@ DECLARE_SHADER_GROUP(Etc2RGB8);
 DECLARE_SHADER_GROUP(Etc2RGBA8);
 
 #undef DECLARE_SHADER_GROUP
+
+constexpr uint32_t kMesaAstcLdr2D[] = {
+#include "mesa/compiled/astc_ldr_2d.inl"
+};
+constexpr ShaderData kMesaAstcLdr2DData = {kMesaAstcLdr2D, sizeof(kMesaAstcLdr2D)};
+constexpr uint32_t kMesaAstcLdr3D[] = {
+#include "mesa/compiled/astc_ldr_3d.inl"
+};
+constexpr ShaderData kMesaAstcLdr3DData = {kMesaAstcLdr3D, sizeof(kMesaAstcLdr3D)};
+constexpr uint32_t kMesaAstcHdr2D[] = {
+#include "mesa/compiled/astc_hdr_2d.inl"
+};
+constexpr ShaderData kMesaAstcHdr2DData = {kMesaAstcHdr2D, sizeof(kMesaAstcHdr2D)};
+constexpr uint32_t kMesaAstcHdr3D[] = {
+#include "mesa/compiled/astc_hdr_3d.inl"
+};
+constexpr ShaderData kMesaAstcHdr3DData = {kMesaAstcHdr3D, sizeof(kMesaAstcHdr3D)};
 
 // Returns the group of shaders that can decompress a given format, or null if none is found.
 const ShaderGroup* getShaderGroup(VkFormat format) {
@@ -91,6 +106,8 @@ const ShaderGroup* getShaderGroup(VkFormat format) {
         case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
         case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
             switch (activeAstcDecoder) {
+                case AstcDecoder::Mesa:
+                    return nullptr;
                 case AstcDecoder::Old:
                     return &kShaderAstc;
                 case AstcDecoder::NewRgb:
@@ -127,6 +144,15 @@ const ShaderGroup* getShaderGroup(VkFormat format) {
 
 // Returns the shader that can decompress a given image format and type
 const ShaderData* getDecompressionShader(VkFormat format, VkImageType imageType) {
+    if (isAstc(format) && activeAstcDecoder == AstcDecoder::Mesa) {
+        if (imageType == VK_IMAGE_TYPE_3D) {
+            return isAstcHdr(format) ? &kMesaAstcHdr3DData : &kMesaAstcLdr3DData;
+        }
+        if (imageType == VK_IMAGE_TYPE_2D) {
+            return isAstcHdr(format) ? &kMesaAstcHdr2DData : &kMesaAstcLdr2DData;
+        }
+        return nullptr;
+    }
     const ShaderGroup* group = getShaderGroup(format);
     if (!group) return nullptr;
 
@@ -144,6 +170,8 @@ const ShaderData* getDecompressionShader(VkFormat format, VkImageType imageType)
 
 const char* string_AstcDecoder(AstcDecoder decoder) {
     switch (decoder) {
+        case AstcDecoder::Mesa:
+            return "Mesa";
         case AstcDecoder::Old:
             return "Old";
         case AstcDecoder::NewRgb:
@@ -204,12 +232,24 @@ bool GpuDecompressionPipeline::initialize() {
         return false;
     }
 
+    const auto block = astcBlockSize(mCompressedFormat);
+    const uint32_t blockDimensions[] = {block.width, block.height};
+    const VkSpecializationMapEntry entries[] = {{0, 0, sizeof(uint32_t)},
+                                               {1, sizeof(uint32_t), sizeof(uint32_t)}};
+    const VkSpecializationInfo specialization = {
+        .mapEntryCount = 2,
+        .pMapEntries = entries,
+        .dataSize = sizeof(blockDimensions),
+        .pData = blockDimensions,
+    };
+    const bool mesaAstc = isAstc(mCompressedFormat) && activeAstcDecoder == AstcDecoder::Mesa;
     VkComputePipelineCreateInfo computePipelineInfo = {
         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                   .stage = VK_SHADER_STAGE_COMPUTE_BIT,
                   .module = shader,
-                  .pName = "main"},
+                  .pName = "main",
+                  .pSpecializationInfo = mesaAstc ? &specialization : nullptr},
         .layout = mPipelineLayout,
     };
     result = mVk->vkCreateComputePipelines(mDevice, nullptr, 1, &computePipelineInfo, nullptr,
@@ -234,14 +274,19 @@ void GpuDecompressionPipelineManager::setAstcDecoder(AstcDecoder value) {
 AstcDecoder GpuDecompressionPipelineManager::astcDecoder() { return activeAstcDecoder; }
 
 GpuDecompressionPipelineManager::GpuDecompressionPipelineManager(VulkanDispatch* vk,
-                                                                 VkDevice device)
-    : mVk(vk), mDevice(device) {}
+                                                                 VkDevice device,
+                                                                 VkPhysicalDevice physicalDevice)
+    : mPhysicalDevice(physicalDevice), mVk(vk), mDevice(device) {}
 
 GpuDecompressionPipeline* GpuDecompressionPipelineManager::get(VkFormat compressedFormat,
                                                                VkImageType imageType) {
-    auto& pipeline = mPipelines[getDecompressionShader(compressedFormat, imageType)];
+    const bool mesaAstc = isAstc(compressedFormat) && activeAstcDecoder == AstcDecoder::Mesa;
+    if (mesaAstc && !mAstcLuts.initialize(mVk, mPhysicalDevice, mDevice)) return nullptr;
+    const uint64_t key = (uint64_t(static_cast<uint32_t>(compressedFormat)) << 8) |
+                         (uint64_t(imageType) << 4) | uint64_t(activeAstcDecoder);
+    auto& pipeline = mPipelines[key];
     if (!pipeline) {
-        VkDescriptorSetLayout descriptorSetLayout = getDescriptorSetLayout();
+        VkDescriptorSetLayout descriptorSetLayout = getDescriptorSetLayout(mesaAstc);
         if (descriptorSetLayout == VK_NULL_HANDLE) return nullptr;
 
         VkPipelineLayout pipelineLayout = getPipelineLayout(compressedFormat);
@@ -253,7 +298,13 @@ GpuDecompressionPipeline* GpuDecompressionPipelineManager::get(VkFormat compress
     return pipeline.get();
 }
 
-VkDescriptorSetLayout GpuDecompressionPipelineManager::getDescriptorSetLayout() {
+void GpuDecompressionPipelineManager::writeAstcDescriptors(VkDescriptorSet set, VkFormat format) {
+    mAstcLuts.writeDescriptors(mVk, mDevice, set, format);
+}
+
+VkDescriptorSetLayout GpuDecompressionPipelineManager::getDescriptorSetLayout(bool mesaAstc) {
+    auto& layout = mesaAstc ? mMesaDescriptorSetLayout : mDescriptorSetLayout;
+    if (layout != VK_NULL_HANDLE) return layout;
     VkDescriptorSetLayoutBinding dsLayoutBindings[] = {
         {
             .binding = 0,
@@ -268,19 +319,27 @@ VkDescriptorSetLayout GpuDecompressionPipelineManager::getDescriptorSetLayout() 
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         },
     };
+    std::vector<VkDescriptorSetLayoutBinding> bindings(std::begin(dsLayoutBindings),
+                                                       std::end(dsLayoutBindings));
+    if (mesaAstc) {
+        for (uint32_t i = 2; i < 8; ++i) {
+            bindings.push_back({i, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1,
+                                VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        }
+    }
     VkDescriptorSetLayoutCreateInfo dsLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = std::size(dsLayoutBindings),
-        .pBindings = dsLayoutBindings,
+        .bindingCount = static_cast<uint32_t>(bindings.size()),
+        .pBindings = bindings.data(),
     };
     VkResult result =
-        mVk->vkCreateDescriptorSetLayout(mDevice, &dsLayoutInfo, nullptr, &mDescriptorSetLayout);
+        mVk->vkCreateDescriptorSetLayout(mDevice, &dsLayoutInfo, nullptr, &layout);
     if (result != VK_SUCCESS) {
         GFXSTREAM_WARNING("GPU decompression: error calling vkCreateDescriptorSetLayout: %d",
                           result);
         return VK_NULL_HANDLE;
     }
-    return mDescriptorSetLayout;
+    return layout;
 }
 
 VkPipelineLayout GpuDecompressionPipelineManager::getPipelineLayout(VkFormat format) {
@@ -289,16 +348,20 @@ VkPipelineLayout GpuDecompressionPipelineManager::getPipelineLayout(VkFormat for
 
     if (isAstc(format)) {
         pipelineLayout = &mAstcPipelineLayout;
-        pushConstant.size = sizeof(AstcPushConstant);
+        pushConstant.size = activeAstcDecoder == AstcDecoder::Mesa
+                                ? sizeof(MesaAstcPushConstant) : sizeof(AstcPushConstant);
     } else {
         pipelineLayout = &mEtc2PipelineLayout;
         pushConstant.size = sizeof(Etc2PushConstant);
     }
 
+    if (*pipelineLayout != VK_NULL_HANDLE) return *pipelineLayout;
+    const auto descriptorLayout = isAstc(format) && activeAstcDecoder == AstcDecoder::Mesa
+                                      ? mMesaDescriptorSetLayout : mDescriptorSetLayout;
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
-        .pSetLayouts = &mDescriptorSetLayout,
+        .pSetLayouts = &descriptorLayout,
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &pushConstant,
     };
@@ -320,6 +383,9 @@ void GpuDecompressionPipelineManager::clear() {
         mVk->vkDestroyPipelineLayout(mDevice, mAstcPipelineLayout, nullptr);
         mVk->vkDestroyPipelineLayout(mDevice, mEtc2PipelineLayout, nullptr);
 
+        mVk->vkDestroyDescriptorSetLayout(mDevice, mMesaDescriptorSetLayout, nullptr);
+        mAstcLuts.destroy(mVk, mDevice);
+        mMesaDescriptorSetLayout = VK_NULL_HANDLE;
         mDescriptorSetLayout = VK_NULL_HANDLE;
         mAstcPipelineLayout = VK_NULL_HANDLE;
         mEtc2PipelineLayout = VK_NULL_HANDLE;

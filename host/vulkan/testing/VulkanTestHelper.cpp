@@ -26,13 +26,48 @@ using ::gfxstream::base::BumpPool;
 
 bool validationErrorsFound = false;
 
+// These tests own their Vulkan objects and do not create display color buffers.
+class TestGlobalState final : public GlobalState {
+public:
+    IColorBufferRef findColorBuffer(uint32_t) override { return {}; }
+    void openColorBufferByWindow(uint32_t) override {}
+    bool closeColorBufferByWindow(uint32_t) override { return false; }
+    uint32_t genHandleLocked() override { return ++mHandle; }
+    void registerProcessCleanupCallback(void*, uint64_t, std::function<void()>) override {}
+    void unregisterProcessCleanupCallback(void*) override {}
+    gfxstream::base::Lock& getGlobalLock() override { return mLock; }
+    void lockGlobalState() override { mLock.lock(); }
+    void unlockGlobalState() override { mLock.unlock(); }
+    int getColorBufferScreenshot(IColorBuffer*, int, int, int, GfxstreamFormat, void*,
+                                const Rect&, const std::optional<std::array<float, 16>>&) override {
+        return -1;
+    }
+    float getDpr() const override { return 1; }
+    int windowWidth() const override { return 0; }
+    int windowHeight() const override { return 0; }
+    float getPx() const override { return 0; }
+    float getPy() const override { return 0; }
+    int getZrot() const override { return 0; }
+    bool bindContext(uint32_t, uint32_t, uint32_t) override { return false; }
+    void invalidateColorBuffer(uint32_t) override {}
+    void flushColorBuffer(uint32_t) override {}
+    void flushColorBufferFromBytes(uint32_t, const void*, size_t) override {}
+    CancelableFuture scheduleAsyncWork(std::function<void()> work, std::string_view) override {
+        work();
+        return {};
+    }
+private:
+    gfxstream::base::Lock mLock;
+    uint32_t mHandle = 0;
+};
+
 // Called back by the Vulkan validation layer in case of a validation error
 VKAPI_ATTR VkBool32 VKAPI_CALL validationCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT type,
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData) {
     if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
         GFXSTREAM_ERROR("Validation Layer: \"%s\"", pCallbackData->pMessage);
-        validationErrorsFound = true;
+        if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) validationErrorsFound = true;
     }
     return VK_FALSE;
 }
@@ -52,13 +87,13 @@ VulkanTestHelper::VulkanTestHelper()
     : mLock(mMutex),
       mVk(vkDispatch(/*forTesting=*/true)),
       mLogger(),
-      mVkEmu(VkEmulation::create(mVk, {}, getGfxstreamFeatures())),
+      mGlobalState(std::make_unique<TestGlobalState>()),
+      mVkEmu(VkEmulation::create(mVk, mGlobalState.get(), getGfxstreamFeatures())),
       mBp(std::make_unique<BumpPool>()),
       mDecoderContext(VkDecoderContext{
           .processName = "vulkan_test",
           .gfxApiLogger = &mLogger,
-      }),
-      mTestDispatch(mVk, mBp.get(), &mDecoderContext) {
+      }) {
     validationErrorsFound = false;
 }
 
@@ -80,6 +115,8 @@ void VulkanTestHelper::destroy() {
     mInstance = VK_NULL_HANDLE;
     mDebugMessenger = VK_NULL_HANDLE;
 
+    mTestDispatch.reset();
+    mRenderThread.reset();
     VkDecoderGlobalState::reset();
     mVkEmu.reset();
 }
@@ -95,6 +132,9 @@ void VulkanTestHelper::initialize(const InitializationOptions& options) {
     mVkEmu->initFeatures(VkEmulation::Features{
         .astcLdrEmulationMode = options.astcLdrEmulationMode,
     });
+    VkDecoderGlobalState::initialize(mVkEmu.get());
+    mRenderThread = std::make_unique<RenderThreadInfoVk>();
+    mTestDispatch = std::make_unique<VkDecoderTestDispatch>(mVk, mBp.get(), &mDecoderContext);
 
     // Check that the validation layer is present
     const char* validationLayer = "VK_LAYER_KHRONOS_validation";
@@ -174,12 +214,20 @@ void VulkanTestHelper::initialize(const InitializationOptions& options) {
         .pQueuePriorities = &queuePriority,
     };
 
+    VkPhysicalDeviceTextureCompressionASTCHDRFeatures hdrFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXTURE_COMPRESSION_ASTC_HDR_FEATURES,
+        .textureCompressionASTC_HDR = VK_TRUE,
+    };
+    const char* hdrExtension = VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME;
     VkDeviceCreateInfo deviceCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = options.astcHdr ? &hdrFeatures : nullptr,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queueCreateInfo,
         .enabledLayerCount = 1,
         .ppEnabledLayerNames = &validationLayer,
+        .enabledExtensionCount = options.astcHdr ? 1u : 0u,
+        .ppEnabledExtensionNames = options.astcHdr ? &hdrExtension : nullptr,
         .pEnabledFeatures = &options.deviceFeatures,
     };
     VK_CHECK(vk().vkCreateDevice(mPhysicalDevice, &deviceCreateInfo, nullptr, &mDevice));

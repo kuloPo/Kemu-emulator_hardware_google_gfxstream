@@ -36,5 +36,7 @@ cc_library_static {
         "astc_texture.cpp",
         "compressed_image_info.cpp",
         "gpu_decompression_pipeline.cpp",
+        "mesa_astc_luts.cpp",
+        "mesa/texcompress_astc_luts.cpp",
     ],
 }

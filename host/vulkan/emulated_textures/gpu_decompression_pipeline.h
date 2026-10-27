@@ -19,6 +19,7 @@
 #include <unordered_map>
 
 #include "goldfish_vk_dispatch.h"
+#include "mesa_astc_luts.h"
 #include "vulkan/vulkan.h"
 
 namespace gfxstream {
@@ -33,6 +34,14 @@ struct ShaderData {
 struct Etc2PushConstant {
     uint32_t compFormat;
     uint32_t baseLayer;
+};
+
+struct MesaAstcPushConstant {
+    int32_t blockOffset[2];
+    int32_t texelEnd[2];
+    uint32_t baseLayer;
+    uint32_t blockWidth;
+    uint32_t blockHeight;
 };
 
 struct AstcPushConstant {
@@ -85,7 +94,7 @@ class GpuDecompressionPipeline {
     VkPipeline mPipeline = VK_NULL_HANDLE;
 };
 
-enum class AstcDecoder{Old, NewRgb, NewBc3};
+enum class AstcDecoder{Old, NewRgb, NewBc3, Mesa};
 
 // Acts as a cache for GpuDecompressionPipeline objects
 // Currently no eviction strategy, but the maximum number of entries is bounded by the number of
@@ -97,7 +106,10 @@ class GpuDecompressionPipelineManager {
     static void setAstcDecoder(AstcDecoder value);
     static AstcDecoder astcDecoder();
 
-    GpuDecompressionPipelineManager(VulkanDispatch* vk, VkDevice device);
+    GpuDecompressionPipelineManager(VulkanDispatch* vk, VkDevice device,
+                                    VkPhysicalDevice physicalDevice);
+
+    void writeAstcDescriptors(VkDescriptorSet set, VkFormat format);
 
     // Returns the cached pipeline for the decompression of a given image format and type.
     // If the pipeline doesn't exist yet, it will be created and initialized.
@@ -115,10 +127,13 @@ class GpuDecompressionPipelineManager {
     GpuDecompressionPipelineManager& operator=(const GpuDecompressionPipelineManager&) = delete;
 
    private:
-    VkDescriptorSetLayout getDescriptorSetLayout();
+    VkDescriptorSetLayout getDescriptorSetLayout(bool mesaAstc);
     VkPipelineLayout getPipelineLayout(VkFormat format);
 
-    std::unordered_map<const ShaderData*, std::unique_ptr<GpuDecompressionPipeline>> mPipelines;
+    std::unordered_map<uint64_t, std::unique_ptr<GpuDecompressionPipeline>> mPipelines;
+    VkPhysicalDevice mPhysicalDevice = VK_NULL_HANDLE;
+    MesaAstcLuts mAstcLuts;
+    VkDescriptorSetLayout mMesaDescriptorSetLayout = VK_NULL_HANDLE;
 
     VulkanDispatch* mVk = nullptr;
     VkDevice mDevice = VK_NULL_HANDLE;

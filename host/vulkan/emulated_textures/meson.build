@@ -5,6 +5,8 @@ files_emulated_textures = files(
   'astc_texture.cpp',
   'compressed_image_info.cpp',
   'gpu_decompression_pipeline.cpp',
+  'mesa_astc_luts.cpp',
+  'mesa/texcompress_astc_luts.cpp',
 )
 
 emulated_texture_args = [

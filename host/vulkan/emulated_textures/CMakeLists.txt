@@ -17,6 +17,8 @@ add_library(
     "astc_texture.cpp"
     "compressed_image_info.cpp"
     "gpu_decompression_pipeline.cpp"
+    "mesa_astc_luts.cpp"
+    "mesa/texcompress_astc_luts.cpp"
     )
 
 target_link_libraries(
