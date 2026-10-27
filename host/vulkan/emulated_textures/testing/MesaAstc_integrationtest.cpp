@@ -24,7 +24,11 @@ constexpr VkFormat kFormats[] = {
 
 class MesaAstcTest : public ::testing::Test {
 protected:
-    void SetUp() override {
+    enum class GeneralRead { None, Memory, Transfer, TransferMemory, Shader };
+
+    void SetUp() override { initialize(); }
+
+    void initialize(bool transferOnly = false) {
         host = vkDispatch(false);
         helper = std::make_unique<VulkanTestHelper>();
         helper->failOnValidationErrors(false);
@@ -34,7 +38,12 @@ protected:
                                 .pApplicationName = "mesa_astc_test",
                                 .apiVersion = VK_API_VERSION_1_3},
                             .deviceFeatures = {.textureCompressionASTC_LDR = VK_TRUE},
-                            .astcHdr = true});
+                            .astcHdr = true,
+                            .enabledDeviceExtensions = {VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME},
+                            .requiredQueueFlags = transferOnly ? VK_QUEUE_TRANSFER_BIT :
+                                                                 VK_QUEUE_GRAPHICS_BIT,
+                            .excludedQueueFlags = transferOnly ?
+                                VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT : 0u});
         device = helper->device();
     }
     void TearDown() override {
@@ -50,11 +59,20 @@ protected:
     }
 
     void barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout,
-                 VkImageLayout newLayout, uint32_t mip, uint32_t firstLayer, uint32_t layers) {
+                 VkImageLayout newLayout, uint32_t mip, uint32_t firstLayer, uint32_t layers,
+                 GeneralRead generalRead = GeneralRead::None) {
+        VkAccessFlags dstAccess = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        if (generalRead == GeneralRead::Transfer) dstAccess = VK_ACCESS_TRANSFER_READ_BIT;
+        if (generalRead == GeneralRead::TransferMemory) dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        if (generalRead == GeneralRead::Shader) {
+            dstAccess = VK_ACCESS_SHADER_READ_BIT;
+            dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
         const VkImageMemoryBarrier transition = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
             .srcAccessMask = oldLayout == VK_IMAGE_LAYOUT_UNDEFINED ? 0u : VK_ACCESS_MEMORY_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+            .dstAccessMask = dstAccess,
             .oldLayout = oldLayout,
             .newLayout = newLayout,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -63,19 +81,30 @@ protected:
             .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, firstLayer, layers},
         };
         helper->vk().vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr,
+                                          dstStage, 0, 0, nullptr,
                                           0, nullptr, 1, &transition);
     }
 
     void check(VkFormat format, VkImageType type, uint32_t layers, bool cube,
-               int endpointMode = -1, bool gradient = false) {
+               int endpointMode = -1, bool gradient = false, bool compressedReadback = false,
+               uint32_t copyVersion = 0, GeneralRead generalRead = GeneralRead::None) {
         SCOPED_TRACE(::testing::Message() << "format=" << format << " type=" << type
-                                         << " layers=" << layers << " cube=" << cube);
+                                         << " layers=" << layers << " cube=" << cube
+                                         << " compressedReadback=" << compressedReadback
+                                         << " copyVersion=" << copyVersion
+                                         << " generalRead=" << static_cast<int>(generalRead));
         auto& vk = helper->vk();
         const bool hdr = isAstcHdr(format);
         const auto block = astcBlockSize(format);
-        const uint32_t width = 37, height = cube ? 37 : 29;
+        const uint32_t width = compressedReadback ? 64 : 37;
+        const uint32_t height = compressedReadback ? 192 : (cube ? 37 : 29);
         const uint32_t depth = type == VK_IMAGE_TYPE_3D ? 5 : 1;
+        const VkImageLayout uploadLayout = generalRead == GeneralRead::None ?
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+        const VkImageLayout shaderLayout = generalRead == GeneralRead::None ?
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
+        const VkImageLayout readbackLayout = compressedReadback && generalRead != GeneralRead::None ?
+            VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         constexpr uint32_t levels = 3;
         const VkImageFormatListCreateInfo formatList = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
@@ -151,12 +180,18 @@ protected:
                     }
                 }
                 for (uint32_t b = 0; b < blocks; ++b) {
+                    if (compressedReadback) {
+                        for (uint32_t byte = 0; byte < data.size(); ++byte) {
+                            data[byte] = uint8_t(b * 13 + slice * 37 + mip * 71 + byte * 17);
+                        }
+                    }
                     compressed.insert(compressed.end(), data.begin(), data.end());
                 }
             }
             readbacks.push_back({readbackSize, 0, 0,
                                  {VK_IMAGE_ASPECT_COLOR_BIT, mip, 0, layers}, {0, 0, 0}, {w, h, d}});
-            readbackSize += size_t(w) * h * d * layers * (hdr ? 8 : 4);
+            readbackSize += compressedReadback ? size_t(blocks) * 16 * d * layers :
+                                                size_t(w) * h * d * layers * (hdr ? 8 : 4);
         }
         VkBuffer upload, readback;
         VkDeviceMemory uploadMemory, readbackMemory;
@@ -173,27 +208,62 @@ protected:
 
         const auto cmd = helper->beginCommandBuffer();
         for (uint32_t mip = 0; mip < levels; ++mip) {
-            barrier(cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            barrier(cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, uploadLayout,
                     mip, 0, layers);
         }
-        vk.vkCmdCopyBufferToImage(cmd, upload, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        vk.vkCmdCopyBufferToImage(cmd, upload, image, uploadLayout,
                                   static_cast<uint32_t>(uploads.size()), uploads.data());
         for (uint32_t mip = 0; mip < levels; ++mip) {
             // Separate layer transitions exercise nonzero baseArrayLayer dispatches.
             for (uint32_t layer = 0; layer < layers; ++layer) {
-                barrier(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mip, layer, 1);
+                if (!compressedReadback) {
+                    barrier(cmd, image, uploadLayout, shaderLayout, mip, layer, 1, generalRead);
+                }
+                barrier(cmd, image, compressedReadback ? uploadLayout : shaderLayout,
+                        readbackLayout, mip, layer, 1,
+                        compressedReadback ? generalRead : GeneralRead::None);
             }
         }
-        // Read the host backing image to inspect decoded pixels rather than compressed blocks.
-        host->vkCmdCopyImageToBuffer(unbox_VkCommandBuffer(cmd), unbox_VkImage(image),
-                                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, unbox_VkBuffer(readback),
+        if (compressedReadback && copyVersion != 0) {
+            std::vector<VkBufferImageCopy2> regions;
+            for (const auto& region : readbacks) {
+                regions.push_back({VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2, nullptr,
+                                   region.bufferOffset, region.bufferRowLength,
+                                   region.bufferImageHeight, region.imageSubresource,
+                                   region.imageOffset, region.imageExtent});
+            }
+            const VkCopyImageToBufferInfo2 copy = {
+                .sType = VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2,
+                .srcImage = unbox_VkImage(image),
+                .srcImageLayout = readbackLayout,
+                .dstBuffer = unbox_VkBuffer(readback),
+                .regionCount = static_cast<uint32_t>(regions.size()),
+                .pRegions = regions.data(),
+            };
+            gfxstream::base::BumpPool pool;
+            auto* state = VkDecoderGlobalState::get();
+            if (copyVersion == 1) {
+                state->on_vkCmdCopyImageToBuffer2(&pool, kInvalidSnapshotApiCallHandle, cmd, &copy);
+            } else {
+                state->on_vkCmdCopyImageToBuffer2KHR(&pool, kInvalidSnapshotApiCallHandle, cmd, &copy);
+            }
+        } else if (compressedReadback) {
+            vk.vkCmdCopyImageToBuffer(cmd, image, readbackLayout, readback,
                                      static_cast<uint32_t>(readbacks.size()), readbacks.data());
+        } else {
+            // Inspect decoded pixels in the host backing image.
+            host->vkCmdCopyImageToBuffer(unbox_VkCommandBuffer(cmd), unbox_VkImage(image),
+                                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, unbox_VkBuffer(readback),
+                                         static_cast<uint32_t>(readbacks.size()), readbacks.data());
+        }
         helper->submitCommandBuffer(cmd);
         ASSERT_EQ(vk.vkMapMemory(device, readbackMemory, 0, VK_WHOLE_SIZE, 0, &mapped), VK_SUCCESS);
         const auto* bytes = static_cast<const uint8_t*>(mapped);
         size_t mismatches = 0;
-        for (uint32_t mip = 0; mip < levels; ++mip) {
+        if (compressedReadback) {
+            EXPECT_EQ(std::memcmp(bytes, compressed.data(), compressed.size()), 0);
+        }
+        for (uint32_t mip = 0; !compressedReadback && mip < levels; ++mip) {
             const auto& region = readbacks[mip];
             const size_t pixels = size_t(region.imageExtent.width) * region.imageExtent.height;
             for (uint32_t slice = 0; slice < layers * region.imageExtent.depth; ++slice) {
@@ -238,6 +308,55 @@ protected:
     VulkanDispatch* host = nullptr;
     VkDevice device = VK_NULL_HANDLE;
 };
+
+class MesaAstcTransferTest : public MesaAstcTest {
+protected:
+    void SetUp() override { initialize(true); }
+};
+
+TEST_F(MesaAstcTransferTest, CompressedArrayAndVolumeMipmaps) {
+    for (uint32_t copyVersion = 0; copyVersion < 3; ++copyVersion) {
+        for (VkFormat format : {VK_FORMAT_ASTC_10x10_UNORM_BLOCK,
+                                VK_FORMAT_ASTC_10x10_SRGB_BLOCK,
+                                VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK}) {
+            check(format, VK_IMAGE_TYPE_2D, 1, false, -1, false, true, copyVersion);
+            check(format, VK_IMAGE_TYPE_2D, 2, false, -1, false, true, copyVersion);
+            check(format, VK_IMAGE_TYPE_3D, 1, false, -1, false, true, copyVersion);
+        }
+    }
+}
+
+TEST_F(MesaAstcTransferTest, GeneralLayoutCompressedMipmaps) {
+    for (auto access : {GeneralRead::Memory, GeneralRead::Transfer, GeneralRead::TransferMemory}) {
+        for (uint32_t copyVersion = 0; copyVersion < 3; ++copyVersion) {
+            for (VkFormat format : {VK_FORMAT_ASTC_10x10_UNORM_BLOCK,
+                                    VK_FORMAT_ASTC_10x10_SRGB_BLOCK,
+                                    VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK}) {
+                check(format, VK_IMAGE_TYPE_2D, 2, false, -1, false, true, copyVersion, access);
+            }
+        }
+    }
+}
+
+TEST_F(MesaAstcTest, GeneralLayoutTransferReads) {
+    for (auto access : {GeneralRead::Transfer, GeneralRead::TransferMemory}) {
+        for (VkFormat format : {VK_FORMAT_ASTC_10x10_UNORM_BLOCK,
+                                VK_FORMAT_ASTC_10x10_SRGB_BLOCK,
+                                VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK}) {
+            check(format, VK_IMAGE_TYPE_2D, 2, false, -1, false, true, 2, access);
+        }
+    }
+}
+
+TEST_F(MesaAstcTest, GeneralLayoutShaderReads) {
+    for (auto access : {GeneralRead::Memory, GeneralRead::Shader}) {
+        for (VkFormat format : {VK_FORMAT_ASTC_10x10_UNORM_BLOCK,
+                                VK_FORMAT_ASTC_10x10_SRGB_BLOCK,
+                                VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK}) {
+            check(format, VK_IMAGE_TYPE_2D, 2, false, -1, false, false, 0, access);
+        }
+    }
+}
 
 TEST_F(MesaAstcTest, AllFormatsArrayMipmaps) {
     for (uint32_t i = 0; i < std::size(kFormats); ++i) {

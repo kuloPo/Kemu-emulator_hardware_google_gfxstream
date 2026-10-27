@@ -79,15 +79,14 @@ class CompressedImageInfo {
     void initAstcCpuDecompression(VulkanDispatch* vk, VkPhysicalDevice physicalDevice);
 
     // Should be called when the guest calls vkCmdPipelineBarrier.
-    // This function checks if the image barrier transitions the compressed image to a layout where
-    // it will be read from, and if so, it decompresses the image.
+    // Decompresses before shader reads when the command buffer's queue supports compute.
     //
     // outputBarriers: any barrier that needs to be passed to the vkCmdPipelineBarrier call will be
     // added to this vector.
     // Returns whether image decompression happened.
     // Note: the global lock must be held when calling this method, because we call into
     // GpuDecompressionPipelineManager.
-    bool decompressIfNeeded(VulkanDispatch* vk, VkCommandBuffer commandBuffer,
+    bool decompressIfNeeded(VulkanDispatch* vk, VkCommandBuffer commandBuffer, VkQueueFlags queueFlags,
                             VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
                             const VkImageMemoryBarrier& targetBarrier,
                             std::vector<VkImageMemoryBarrier>& outputBarriers);

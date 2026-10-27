@@ -14,8 +14,6 @@
 
 #include "compressed_image_info.h"
 
-#include <vulkan/vk_enum_string_helper.h>
-
 #include "emulated_textures/shaders/decompression_shaders.h"
 #include "gfxstream/ArraySize.h"
 #include "gfxstream/common/logging.h"
@@ -97,48 +95,37 @@ bool isReadableImageLayout(VkImageLayout layout) {
     switch (layout) {
         case VK_IMAGE_LAYOUT_GENERAL:
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
         case VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL_KHR:
             return true;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            // Transfer reads use the original compressed blocks. A transfer-only queue
+            // cannot execute the compute shader used to produce decoded texels.
+            return false;
         default:
             return false;
     }
 }
 
-bool isWritableImageLayout(VkImageLayout layout) {
-    switch (layout) {
-        case VK_IMAGE_LAYOUT_GENERAL:
-        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// Returns whether a given memory barrier puts the image in a layout where it can be read from.
-bool imageWillBecomeReadable(const VkImageMemoryBarrier& barrier) {
-    bool fromReadable = isReadableImageLayout(barrier.oldLayout);
-    bool toReadable = isReadableImageLayout(barrier.newLayout);
-    bool toWritable = isWritableImageLayout(barrier.newLayout);
-
-    // TODO(gregschlom) This doesn't take into account that the GENERAL layout is both readable and
-    //  writable, so this warning could incorrectly trigger some times.
-    if (fromReadable && toWritable) {
-        GFXSTREAM_WARNING(
-            "Compressed image is being transitioned from readable (%s) to writable (%s). This may "
-            "lead to unexpected results.",
-            string_VkImageLayout(barrier.oldLayout), string_VkImageLayout(barrier.newLayout));
-    }
-
+bool imageWillBecomeReadable(const VkImageMemoryBarrier& barrier,
+                             VkPipelineStageFlags dstStageMask) {
     // If we're transitioning from UNDEFINED, the image content is undefined, so don't try to
     // decompress it.
     if (barrier.oldLayout == VK_IMAGE_LAYOUT_UNDEFINED) return false;
 
-    // TODO(gregschlom): Address the corner case of GENERAL, which is both readable and writable.
-    // For example, the image could be transitioned only once, from UNDEFINED to GENERAL.
-    // Currently, there is no way to perform decompression in this case.
-
-    return toReadable;
+    if (barrier.newLayout == VK_IMAGE_LAYOUT_GENERAL) {
+        // GENERAL also permits transfer reads and writes, which use compressed blocks.
+        constexpr VkAccessFlags shaderReads = VK_ACCESS_SHADER_READ_BIT |
+            VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+        constexpr VkPipelineStageFlags shaderStages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+            VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+            VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
+            VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT |
+            VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+            VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        return (barrier.dstAccessMask & shaderReads) && (dstStageMask & shaderStages);
+    }
+    return isReadableImageLayout(barrier.newLayout);
 }
 
 bool isCompressedFormat(VkFormat format) {
@@ -423,14 +410,16 @@ void CompressedImageInfo::initAstcCpuDecompression(VulkanDispatch* vk,
 }
 
 bool CompressedImageInfo::decompressIfNeeded(VulkanDispatch* vk, VkCommandBuffer commandBuffer,
+                                             VkQueueFlags queueFlags,
                                              VkPipelineStageFlags srcStageMask,
                                              VkPipelineStageFlags dstStageMask,
                                              const VkImageMemoryBarrier& targetBarrier,
                                              std::vector<VkImageMemoryBarrier>& outputBarriers) {
     std::vector<VkImageMemoryBarrier> imageBarriers = getImageBarriers(targetBarrier);
 
-    if (!imageWillBecomeReadable(targetBarrier)) {
-        // We're not going to read from the image, no need to decompress it.
+    if (!(queueFlags & VK_QUEUE_COMPUTE_BIT) ||
+        !imageWillBecomeReadable(targetBarrier, dstStageMask)) {
+        // Decoding is needed only for shader reads on a compute-capable queue.
         // Apply the target barrier to the compressed mipmaps and the decompressed image.
         outputBarriers.insert(outputBarriers.end(), imageBarriers.begin(), imageBarriers.end());
         return false;

@@ -630,6 +630,7 @@ struct CommandBufferInfo {
 struct CommandPoolInfo {
     VkDevice device = VK_NULL_HANDLE;
     VkCommandPool boxed = VK_NULL_HANDLE;
+    VkQueueFlags queueFlags = 0;
     std::unordered_set<VkCommandBuffer> cmdBuffers = {};
 };
 

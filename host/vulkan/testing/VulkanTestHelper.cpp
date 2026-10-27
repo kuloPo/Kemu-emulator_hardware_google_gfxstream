@@ -209,7 +209,8 @@ void VulkanTestHelper::initialize(const InitializationOptions& options) {
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = getQueueFamilyIndex(VK_QUEUE_GRAPHICS_BIT),
+        .queueFamilyIndex = getQueueFamilyIndex(
+            options.requiredQueueFlags.value_or(VK_QUEUE_GRAPHICS_BIT), options.excludedQueueFlags),
         .queueCount = 1,
         .pQueuePriorities = &queuePriority,
     };
@@ -218,7 +219,13 @@ void VulkanTestHelper::initialize(const InitializationOptions& options) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXTURE_COMPRESSION_ASTC_HDR_FEATURES,
         .textureCompressionASTC_HDR = VK_TRUE,
     };
-    const char* hdrExtension = VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME;
+    std::vector<const char*> deviceExtensions;
+    for (const auto& extension : options.enabledDeviceExtensions) {
+        deviceExtensions.push_back(extension.c_str());
+    }
+    if (options.astcHdr) {
+        deviceExtensions.push_back(VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME);
+    }
     VkDeviceCreateInfo deviceCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = options.astcHdr ? &hdrFeatures : nullptr,
@@ -226,13 +233,13 @@ void VulkanTestHelper::initialize(const InitializationOptions& options) {
         .pQueueCreateInfos = &queueCreateInfo,
         .enabledLayerCount = 1,
         .ppEnabledLayerNames = &validationLayer,
-        .enabledExtensionCount = options.astcHdr ? 1u : 0u,
-        .ppEnabledExtensionNames = options.astcHdr ? &hdrExtension : nullptr,
+        .enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size()),
+        .ppEnabledExtensionNames = deviceExtensions.data(),
         .pEnabledFeatures = &options.deviceFeatures,
     };
     VK_CHECK(vk().vkCreateDevice(mPhysicalDevice, &deviceCreateInfo, nullptr, &mDevice));
 
-    // Get a graphics queue
+    // Get a queue from the requested family.
     vk().vkGetDeviceQueue(mDevice, queueCreateInfo.queueFamilyIndex, 0, &mGraphicsQueue);
     assert(mGraphicsQueue != VK_NULL_HANDLE);
 
@@ -279,7 +286,7 @@ void VulkanTestHelper::submitCommandBuffer(VkCommandBuffer commandBuffer) {
     vk().vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cmdBuf);
 }
 
-uint32_t VulkanTestHelper::getQueueFamilyIndex(VkQueueFlagBits queueFlags) {
+uint32_t VulkanTestHelper::getQueueFamilyIndex(VkQueueFlags queueFlags, VkQueueFlags excludedFlags) {
     uint32_t queueFamilyCount = 0;
     vk().vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &queueFamilyCount, nullptr);
 
@@ -287,7 +294,8 @@ uint32_t VulkanTestHelper::getQueueFamilyIndex(VkQueueFlagBits queueFlags) {
     vk().vkGetPhysicalDeviceQueueFamilyProperties(mPhysicalDevice, &queueFamilyCount,
                                                   queueFamilies.data());
     for (uint32_t i = 0; i < static_cast<uint32_t>(queueFamilies.size()); i++) {
-        if (queueFamilies[i].queueFlags & queueFlags) {
+        if ((queueFamilies[i].queueFlags & queueFlags) == queueFlags &&
+            !(queueFamilies[i].queueFlags & excludedFlags)) {
             return i;
         }
     }

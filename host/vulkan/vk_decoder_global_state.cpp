@@ -6187,6 +6187,9 @@ class VkDecoderGlobalState::Impl {
 
         // This is a compressed image. Handle decompression before calling vkCmdPipelineBarrier
 
+        const auto* commandPoolInfo = gfxstream::base::find(mCommandPoolInfo, cmdBufferInfo->cmdPool);
+        if (!commandPoolInfo) return;
+
         std::vector<VkImageMemoryBarrier> imageBarriers;
         bool needRebind = false;
 
@@ -6208,7 +6211,8 @@ class VkDecoderGlobalState::Impl {
 
             // Otherwise, decompress the image, if we're going to read from it.
             needRebind |= imageInfo->compressInfo->decompressIfNeeded(
-                vk, commandBuffer, srcStageMask, dstStageMask, srcBarrier, imageBarriers);
+                vk, commandBuffer, commandPoolInfo->queueFlags, srcStageMask, dstStageMask,
+                srcBarrier, imageBarriers);
         }
 
         if (needRebind && cmdBufferInfo->computePipeline) {
@@ -7681,6 +7685,10 @@ class VkDecoderGlobalState::Impl {
         mCommandPoolInfo[*pCommandPool] = CommandPoolInfo();
         auto& cmdPoolInfo = mCommandPoolInfo[*pCommandPool];
         cmdPoolInfo.device = device;
+        const auto& deviceInfo = mDeviceInfo.at(device);
+        const auto& physicalDeviceInfo = mPhysdevInfo.at(deviceInfo.physicalDevice);
+        cmdPoolInfo.queueFlags = physicalDeviceInfo.queuePropertiesHelper->getQueueFamilyProperties()
+                                     .at(localCI.queueFamilyIndex).queueFlags;
 
         *pCommandPool = new_boxed_non_dispatchable_VkCommandPool(*pCommandPool);
         cmdPoolInfo.boxed = *pCommandPool;

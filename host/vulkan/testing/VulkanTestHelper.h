@@ -55,6 +55,9 @@ class VulkanTestHelper {
         VkPhysicalDeviceFeatures deviceFeatures;
         std::vector<std::string> enabledExtensions;  // enabled extensions for vkCreateInstance
         bool astcHdr;
+        std::vector<std::string> enabledDeviceExtensions;
+        std::optional<VkQueueFlags> requiredQueueFlags;
+        VkQueueFlags excludedQueueFlags;
     };
 
     void initialize(const InitializationOptions& options = {});
@@ -77,7 +80,7 @@ class VulkanTestHelper {
     void submitCommandBuffer(VkCommandBuffer commandBuffer);
 
     // Gets the index of a queue family that supports the requested queue flags, or aborts.
-    uint32_t getQueueFamilyIndex(VkQueueFlagBits queueFlags);
+    uint32_t getQueueFamilyIndex(VkQueueFlags queueFlags, VkQueueFlags excludedFlags = 0);
 
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
