@@ -2411,6 +2411,14 @@ void transform_fromhost_VkSemaphoreGetFdInfoKHR(VkDecoderGlobalState* resourceTr
                                                 VkSemaphoreGetFdInfoKHR* toTransform);
 
 #endif
+#ifdef VK_KHR_push_descriptor
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDevicePushDescriptorProperties,
+                      transform_tohost_VkPhysicalDevicePushDescriptorPropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDevicePushDescriptorProperties,
+                      transform_fromhost_VkPhysicalDevicePushDescriptorPropertiesKHR)
+
+#endif
 #ifdef VK_KHR_shader_float16_int8
 DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceShaderFloat16Int8Features,
                       transform_tohost_VkPhysicalDeviceShaderFloat16Int8FeaturesKHR)

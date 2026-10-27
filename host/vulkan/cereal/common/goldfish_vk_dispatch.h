@@ -398,6 +398,9 @@ struct VulkanDispatch {
     PFN_vkImportSemaphoreFdKHR vkImportSemaphoreFdKHR;
     PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR;
 #endif
+#ifdef VK_KHR_push_descriptor
+    PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
+#endif
 #ifdef VK_KHR_descriptor_update_template
     PFN_vkCreateDescriptorUpdateTemplateKHR vkCreateDescriptorUpdateTemplateKHR;
     PFN_vkDestroyDescriptorUpdateTemplateKHR vkDestroyDescriptorUpdateTemplateKHR;

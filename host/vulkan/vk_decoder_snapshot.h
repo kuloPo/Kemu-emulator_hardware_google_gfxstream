@@ -1315,6 +1315,15 @@ class VkDecoderSnapshot {
                              VkResult input_result, VkDevice device,
                              const VkSemaphoreGetFdInfoKHR* pGetFdInfo, int* pFd);
 #endif
+#ifdef VK_KHR_push_descriptor
+    void vkCmdPushDescriptorSetKHR(gfxstream::base::BumpPool* pool,
+                                   VkSnapshotApiCallHandle apiCallHandle,
+                                   const uint8_t* apiCallPacket, size_t apiCallPacketSize,
+                                   VkCommandBuffer commandBuffer,
+                                   VkPipelineBindPoint pipelineBindPoint, VkPipelineLayout layout,
+                                   uint32_t set, uint32_t descriptorWriteCount,
+                                   const VkWriteDescriptorSet* pDescriptorWrites);
+#endif
 #ifdef VK_KHR_descriptor_update_template
     void vkCreateDescriptorUpdateTemplateKHR(
         gfxstream::base::BumpPool* pool, VkSnapshotApiCallHandle apiCallHandle,

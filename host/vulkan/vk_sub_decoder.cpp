@@ -3059,6 +3059,59 @@ size_t subDecode(VulkanMemReadingStream* readStream, VulkanDispatch* vk,
                 break;
             }
 #endif
+#ifdef VK_KHR_push_descriptor
+            case OP_vkCmdPushDescriptorSetKHR: {
+                GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
+                                      "VkSubDecoder vkCmdPushDescriptorSetKHR");
+                VkPipelineBindPoint pipelineBindPoint;
+                VkPipelineLayout layout;
+                uint32_t set;
+                uint32_t descriptorWriteCount;
+                const VkWriteDescriptorSet* pDescriptorWrites;
+                VkWriteDescriptorSet stack_pDescriptorWrites[MAX_STACK_ITEMS];
+                memcpy((VkPipelineBindPoint*)&pipelineBindPoint, *readStreamPtrPtr,
+                       sizeof(VkPipelineBindPoint));
+                *readStreamPtrPtr += sizeof(VkPipelineBindPoint);
+                uint64_t cgen_var_0;
+                memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkPipelineLayout*)&layout =
+                    (VkPipelineLayout)unbox_VkPipelineLayout((VkPipelineLayout)(*&cgen_var_0));
+                memcpy((uint32_t*)&set, *readStreamPtrPtr, sizeof(uint32_t));
+                *readStreamPtrPtr += sizeof(uint32_t);
+                memcpy((uint32_t*)&descriptorWriteCount, *readStreamPtrPtr, sizeof(uint32_t));
+                *readStreamPtrPtr += sizeof(uint32_t);
+                if (descriptorWriteCount <= MAX_STACK_ITEMS) {
+                    pDescriptorWrites = (VkWriteDescriptorSet*)stack_pDescriptorWrites;
+                } else {
+                    readStream->alloc((void**)&pDescriptorWrites,
+                                      descriptorWriteCount * sizeof(const VkWriteDescriptorSet));
+                }
+                for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+                    reservedunmarshal_VkWriteDescriptorSet(
+                        readStream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                        (VkWriteDescriptorSet*)(pDescriptorWrites + i), readStreamPtrPtr);
+                }
+                if (pDescriptorWrites) {
+                    for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+                        transform_tohost_VkWriteDescriptorSet(
+                            globalstate, (VkWriteDescriptorSet*)(pDescriptorWrites + i));
+                    }
+                }
+                if (CC_LIKELY(vk)) {
+                    vk->vkCmdPushDescriptorSetKHR((VkCommandBuffer)dispatchHandle,
+                                                  pipelineBindPoint, layout, set,
+                                                  descriptorWriteCount, pDescriptorWrites);
+                }
+                if (snapshotsEnabled()) {
+                    this->snapshot()->vkCmdPushDescriptorSetKHR(
+                        pool, snapshotApiCallHandle, nullptr, 0,
+                        (VkCommandBuffer)(boxed_dispatchHandle), pipelineBindPoint, layout, set,
+                        descriptorWriteCount, pDescriptorWrites);
+                }
+                break;
+            }
+#endif
 #ifdef VK_KHR_create_renderpass2
             case OP_vkCmdBeginRenderPass2KHR: {
                 GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,

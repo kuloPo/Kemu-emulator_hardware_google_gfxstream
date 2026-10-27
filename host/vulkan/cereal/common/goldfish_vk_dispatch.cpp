@@ -561,6 +561,10 @@ void init_vulkan_dispatch_from_system_loader(DlOpenFunc dlOpenFunc, DlSymFunc dl
         (PFN_vkImportSemaphoreFdKHR)dlSymFunc(lib, "vkImportSemaphoreFdKHR");
     out->vkGetSemaphoreFdKHR = (PFN_vkGetSemaphoreFdKHR)dlSymFunc(lib, "vkGetSemaphoreFdKHR");
 #endif
+#ifdef VK_KHR_push_descriptor
+    out->vkCmdPushDescriptorSetKHR =
+        (PFN_vkCmdPushDescriptorSetKHR)dlSymFunc(lib, "vkCmdPushDescriptorSetKHR");
+#endif
 #ifdef VK_KHR_descriptor_update_template
     out->vkCreateDescriptorUpdateTemplateKHR = (PFN_vkCreateDescriptorUpdateTemplateKHR)dlSymFunc(
         lib, "vkCreateDescriptorUpdateTemplateKHR");
@@ -1609,6 +1613,10 @@ void init_vulkan_dispatch_from_instance(VulkanDispatch* vk, VkInstance instance,
         (PFN_vkImportSemaphoreFdKHR)vk->vkGetInstanceProcAddr(instance, "vkImportSemaphoreFdKHR");
     out->vkGetSemaphoreFdKHR =
         (PFN_vkGetSemaphoreFdKHR)vk->vkGetInstanceProcAddr(instance, "vkGetSemaphoreFdKHR");
+#endif
+#ifdef VK_KHR_push_descriptor
+    out->vkCmdPushDescriptorSetKHR = (PFN_vkCmdPushDescriptorSetKHR)vk->vkGetInstanceProcAddr(
+        instance, "vkCmdPushDescriptorSetKHR");
 #endif
 #ifdef VK_KHR_descriptor_update_template
     out->vkCreateDescriptorUpdateTemplateKHR =
@@ -2710,6 +2718,10 @@ void init_vulkan_dispatch_from_device(VulkanDispatch* vk, VkDevice device, Vulka
         (PFN_vkImportSemaphoreFdKHR)vk->vkGetDeviceProcAddr(device, "vkImportSemaphoreFdKHR");
     out->vkGetSemaphoreFdKHR =
         (PFN_vkGetSemaphoreFdKHR)vk->vkGetDeviceProcAddr(device, "vkGetSemaphoreFdKHR");
+#endif
+#ifdef VK_KHR_push_descriptor
+    out->vkCmdPushDescriptorSetKHR =
+        (PFN_vkCmdPushDescriptorSetKHR)vk->vkGetDeviceProcAddr(device, "vkCmdPushDescriptorSetKHR");
 #endif
 #ifdef VK_KHR_descriptor_update_template
     out->vkCreateDescriptorUpdateTemplateKHR =

@@ -1475,6 +1475,11 @@ void reservedunmarshal_VkSemaphoreGetFdInfoKHR(VulkanStream* vkStream, VkStructu
                                                uint8_t** ptr);
 
 #endif
+#ifdef VK_KHR_push_descriptor
+DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDevicePushDescriptorProperties,
+                      reservedunmarshal_VkPhysicalDevicePushDescriptorPropertiesKHR)
+
+#endif
 #ifdef VK_KHR_shader_float16_int8
 DEFINE_ALIAS_FUNCTION(reservedunmarshal_VkPhysicalDeviceShaderFloat16Int8Features,
                       reservedunmarshal_VkPhysicalDeviceShaderFloat16Int8FeaturesKHR)

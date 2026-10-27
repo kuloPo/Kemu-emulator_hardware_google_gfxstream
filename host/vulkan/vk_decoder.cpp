@@ -15406,6 +15406,75 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                 break;
             }
 #endif
+#ifdef VK_KHR_push_descriptor
+            case OP_vkCmdPushDescriptorSetKHR: {
+                GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
+                                      "VkDecoder vkCmdPushDescriptorSetKHR");
+                VkCommandBuffer commandBuffer;
+                VkPipelineBindPoint pipelineBindPoint;
+                VkPipelineLayout layout;
+                uint32_t set;
+                uint32_t descriptorWriteCount;
+                const VkWriteDescriptorSet* pDescriptorWrites;
+                // Begin non wrapped dispatchable handle unboxing for commandBuffer;
+                uint64_t cgen_var_0;
+                memcpy((uint64_t*)&cgen_var_0, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkCommandBuffer*)&commandBuffer =
+                    (VkCommandBuffer)(VkCommandBuffer)((VkCommandBuffer)(*&cgen_var_0));
+                auto unboxed_commandBuffer = unbox_VkCommandBuffer(commandBuffer);
+                auto vk = dispatch_VkCommandBuffer(commandBuffer);
+                // End manual dispatchable handle unboxing for commandBuffer;
+                memcpy((VkPipelineBindPoint*)&pipelineBindPoint, *readStreamPtrPtr,
+                       sizeof(VkPipelineBindPoint));
+                *readStreamPtrPtr += sizeof(VkPipelineBindPoint);
+                uint64_t cgen_var_1;
+                memcpy((uint64_t*)&cgen_var_1, *readStreamPtrPtr, 1 * 8);
+                *readStreamPtrPtr += 1 * 8;
+                *(VkPipelineLayout*)&layout =
+                    (VkPipelineLayout)unbox_VkPipelineLayout((VkPipelineLayout)(*&cgen_var_1));
+                memcpy((uint32_t*)&set, *readStreamPtrPtr, sizeof(uint32_t));
+                *readStreamPtrPtr += sizeof(uint32_t);
+                memcpy((uint32_t*)&descriptorWriteCount, *readStreamPtrPtr, sizeof(uint32_t));
+                *readStreamPtrPtr += sizeof(uint32_t);
+                vkReadStream->alloc((void**)&pDescriptorWrites,
+                                    descriptorWriteCount * sizeof(const VkWriteDescriptorSet));
+                for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+                    reservedunmarshal_VkWriteDescriptorSet(
+                        vkReadStream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                        (VkWriteDescriptorSet*)(pDescriptorWrites + i), readStreamPtrPtr);
+                }
+                if (pDescriptorWrites) {
+                    for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+                        transform_tohost_VkWriteDescriptorSet(
+                            m_state, (VkWriteDescriptorSet*)(pDescriptorWrites + i));
+                    }
+                }
+                if (m_logCalls) {
+                    GFXSTREAM_INFO(
+                        "stream %p: call vkCmdPushDescriptorSetKHR 0x%llx "
+                        "0x%llx 0x%llx 0x%llx 0x%llx 0x%llx ",
+                        ioStream, (unsigned long long)commandBuffer,
+                        (unsigned long long)pipelineBindPoint, (unsigned long long)layout,
+                        (unsigned long long)set, (unsigned long long)descriptorWriteCount,
+                        (unsigned long long)pDescriptorWrites);
+                }
+                if (CC_LIKELY(vk)) {
+                    vk->vkCmdPushDescriptorSetKHR(unboxed_commandBuffer, pipelineBindPoint, layout,
+                                                  set, descriptorWriteCount, pDescriptorWrites);
+                }
+                vkStream->unsetHandleMapping();
+                if (m_snapshotsEnabled) {
+                    m_state->snapshot()->vkCmdPushDescriptorSetKHR(
+                        &m_pool, snapshotApiCallHandle, packet, packetLen, commandBuffer,
+                        pipelineBindPoint, layout, set, descriptorWriteCount, pDescriptorWrites);
+                }
+                vkReadStream->clearPool();
+                if (m_queueSubmitWithCommandsEnabled)
+                    seqnoPtr->fetch_add(1, std::memory_order_seq_cst);
+                break;
+            }
+#endif
 #ifdef VK_KHR_descriptor_update_template
             case OP_vkCreateDescriptorUpdateTemplateKHR: {
                 GFXSTREAM_TRACE_EVENT(GFXSTREAM_TRACE_DECODER_CATEGORY,
