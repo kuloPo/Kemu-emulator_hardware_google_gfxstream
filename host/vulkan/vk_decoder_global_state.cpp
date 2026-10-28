@@ -35,6 +35,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -3016,21 +3017,6 @@ class VkDecoderGlobalState::Impl {
         auto device = unbox_VkDevice(boxed_device);
         auto vk = dispatch_VkDevice(boxed_device);
 
-        if (vk->vkGetDeviceImageMemoryRequirements) {
-            vk->vkGetDeviceImageMemoryRequirements(device, pInfo, pMemoryRequirements);
-        } else if (vk->vkGetDeviceImageMemoryRequirementsKHR) {
-            vk->vkGetDeviceImageMemoryRequirementsKHR(device, pInfo, pMemoryRequirements);
-        } else {
-            GFXSTREAM_FATAL("%s: function implementation cannot be found!");
-        }
-
-        const VkFormat format = pInfo->pCreateInfo->format;
-        bool needDecompression = isEtc2(format) || isAstc(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
-        }
-
         std::lock_guard<std::mutex> lock(mMutex);
 
         auto* deviceInfo = gfxstream::base::find(mDeviceInfo, device);
@@ -3039,30 +3025,40 @@ class VkDecoderGlobalState::Impl {
             return;
         }
 
-        needDecompression = deviceInfo->needEmulatedDecompression(format);
-        if (!needDecompression) {
-            // No modifications needed
-            return;
+        VkDeviceImageMemoryRequirements hostInfo = *pInfo;
+        VkImageCreateInfo hostCreateInfo;
+        std::optional<CompressedImageInfo> compressedImage;
+        if (deviceInfo->needEmulatedDecompression(pInfo->pCreateInfo->format)) {
+            compressedImage.emplace(device, *pInfo->pCreateInfo,
+                                    deviceInfo->decompPipelines.get());
+            hostCreateInfo = compressedImage->getOutputCreateInfo(*pInfo->pCreateInfo, pool);
+            hostInfo.pCreateInfo = &hostCreateInfo;
         }
 
-        // Create CompressedImageInfo on the fly to get requirements to use when creating the image
-        CompressedImageInfo cmpInfo =
-            CompressedImageInfo(device, *pInfo->pCreateInfo, deviceInfo->decompPipelines.get());
-        {
-            VkImageCreateInfo decompInfo = cmpInfo.getOutputCreateInfo(*pInfo->pCreateInfo, pool);
-            VkImage tempImage;
-            VkResult createRes = vk->vkCreateImage(device, &decompInfo, nullptr, &tempImage);
+        // Query the host format, including extension outputs, before combining the
+        // decoded image and compressed mipmap storage requirements.
+        if (vk->vkGetDeviceImageMemoryRequirements) {
+            vk->vkGetDeviceImageMemoryRequirements(device, &hostInfo, pMemoryRequirements);
+        } else if (vk->vkGetDeviceImageMemoryRequirementsKHR) {
+            vk->vkGetDeviceImageMemoryRequirementsKHR(device, &hostInfo, pMemoryRequirements);
+        } else {
+            GFXSTREAM_FATAL("%s: function implementation cannot be found!", __func__);
+        }
+
+        if (compressedImage) {
+            VkImage tempImage = VK_NULL_HANDLE;
+            VkResult createRes = vk->vkCreateImage(device, &hostCreateInfo, nullptr, &tempImage);
             if (createRes != VK_SUCCESS) {
-                GFXSTREAM_ERROR("%s: Failed to find device info for device: %p", __func__, device);
+                GFXSTREAM_ERROR("%s: Failed to create image for memory requirements: %d", __func__,
+                                createRes);
                 return;
             }
 
-            cmpInfo.setOutputImage(tempImage);
-            cmpInfo.createCompressedMipmapImages(vk, decompInfo);
+            compressedImage->setOutputImage(tempImage);
+            compressedImage->createCompressedMipmapImages(vk, hostCreateInfo);
+            pMemoryRequirements->memoryRequirements = compressedImage->getMemoryRequirements();
+            compressedImage->destroy(vk);
         }
-
-        pMemoryRequirements->memoryRequirements = cmpInfo.getMemoryRequirements();
-        cmpInfo.destroy(vk);
 
         auto* physicalDeviceInfo = gfxstream::base::find(mPhysdevInfo, deviceInfo->physicalDevice);
         if (!physicalDeviceInfo) {
