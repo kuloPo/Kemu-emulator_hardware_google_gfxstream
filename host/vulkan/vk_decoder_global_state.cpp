@@ -95,6 +95,43 @@ using gfxstream::base::StaticLock;
 using gfxstream::base::UdmabufCreator;
 using gfxstream::host::GfxApiLogger;
 
+template <typename GetFeatures>
+static VkResult validateVulkan11Features(const GetFeatures& getFeatures, VkPhysicalDevice physicalDevice,
+                                         const VkDeviceCreateInfo& createInfo) {
+    const auto* requested = vk_find_struct<VkPhysicalDeviceVulkan11Features>(&createInfo);
+    if (!requested) return VK_SUCCESS;
+
+    VkPhysicalDeviceVulkan11Features supported = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+    };
+    VkPhysicalDeviceFeatures2 features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &supported,
+    };
+    getFeatures(physicalDevice, &features);
+
+    // Reject unsupported requests before host layers can dereference a failed device.
+#define CHECK_VULKAN11_FEATURE(feature)                                                \
+    if (requested->feature && !supported.feature) {                                   \
+        GFXSTREAM_WARNING("Unsupported Vulkan 1.1 feature requested: %s", #feature);   \
+        return VK_ERROR_FEATURE_NOT_PRESENT;                                          \
+    }
+    CHECK_VULKAN11_FEATURE(storageBuffer16BitAccess);
+    CHECK_VULKAN11_FEATURE(uniformAndStorageBuffer16BitAccess);
+    CHECK_VULKAN11_FEATURE(storagePushConstant16);
+    CHECK_VULKAN11_FEATURE(storageInputOutput16);
+    CHECK_VULKAN11_FEATURE(multiview);
+    CHECK_VULKAN11_FEATURE(multiviewGeometryShader);
+    CHECK_VULKAN11_FEATURE(multiviewTessellationShader);
+    CHECK_VULKAN11_FEATURE(variablePointersStorageBuffer);
+    CHECK_VULKAN11_FEATURE(variablePointers);
+    CHECK_VULKAN11_FEATURE(protectedMemory);
+    CHECK_VULKAN11_FEATURE(samplerYcbcrConversion);
+    CHECK_VULKAN11_FEATURE(shaderDrawParameters);
+#undef CHECK_VULKAN11_FEATURE
+    return VK_SUCCESS;
+}
+
 static VkImageAspectFlags clearableAspects(VkImageLayout layout) {
     constexpr auto all =
         VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
@@ -2609,6 +2646,17 @@ class VkDecoderGlobalState::Impl {
         createInfoFiltered.enabledExtensionCount = (uint32_t)updatedDeviceExtensions.size();
         createInfoFiltered.ppEnabledExtensionNames = updatedDeviceExtensions.data();
 
+        // Check the host request after removing features provided by emulation.
+        const auto getFeatures2 = vk->vkGetPhysicalDeviceFeatures2
+                                      ? vk->vkGetPhysicalDeviceFeatures2
+                                      : vk->vkGetPhysicalDeviceFeatures2KHR;
+        if (getFeatures2) {
+            if (VkResult result = validateVulkan11Features(getFeatures2, physicalDevice,
+                                                         createInfoFiltered);
+                result != VK_SUCCESS) {
+                return result;
+            }
+        }
 
         const bool swiftshader =
             (gfxstream::base::getEnvironmentVariable("ANDROID_EMU_VK_ICD").compare("swiftshader") ==
@@ -6385,6 +6433,12 @@ class VkDecoderGlobalState::Impl {
     bool mapHostVisibleMemoryToGuestPhysicalAddressLocked(VulkanDispatch* vk, VkDevice device,
                                                           VkDeviceMemory memory, uint64_t physAddr)
         REQUIRES(mMutex) {
+        // A failed guest address-space reservation must never replace guest RAM.
+        if (!physAddr) {
+            GFXSTREAM_ERROR("Cannot map Vulkan memory at guest physical address zero");
+            return false;
+        }
+
         if (!m_vkEmulation->getFeatures().GlDirectMem.enabled() &&
             !m_vkEmulation->getFeatures().VirtioGpuNext.enabled()) {
             // GFXSTREAM_INFO("%s: Tried to use direct mapping "

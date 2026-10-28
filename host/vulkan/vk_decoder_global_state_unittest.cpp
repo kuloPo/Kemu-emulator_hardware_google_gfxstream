@@ -30,6 +30,116 @@ using ::testing::Return;
 using ::testing::Test;
 using ::testing::UnorderedElementsAre;
 
+class Vulkan11DeviceFeaturesTest : public Test {
+   protected:
+    struct MockDispatch {
+        MOCK_METHOD(void, vkGetPhysicalDeviceFeatures2,
+                    (VkPhysicalDevice, VkPhysicalDeviceFeatures2*));
+    };
+
+    Vulkan11DeviceFeaturesTest() {
+        requested.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features.pNext = &requested;
+        createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        createInfo.pNext = &features;
+        ON_CALL(dispatch, vkGetPhysicalDeviceFeatures2(physicalDevice, _))
+            .WillByDefault([this](VkPhysicalDevice, VkPhysicalDeviceFeatures2* query) {
+                EXPECT_EQ(query->sType, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
+                auto* queried = static_cast<VkPhysicalDeviceVulkan11Features*>(query->pNext);
+                EXPECT_EQ(queried->sType, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES);
+                EXPECT_EQ(queried->pNext, nullptr);
+                *queried = supported;
+            });
+    }
+
+    VkResult validate() {
+        return validateVulkan11Features(
+            [this](VkPhysicalDevice device, VkPhysicalDeviceFeatures2* query) {
+                dispatch.vkGetPhysicalDeviceFeatures2(device, query);
+            },
+            physicalDevice, createInfo);
+    }
+
+    MockDispatch dispatch;
+    VkPhysicalDevice physicalDevice = reinterpret_cast<VkPhysicalDevice>(0x1234'0000);
+    VkPhysicalDeviceVulkan11Features requested{};
+    VkPhysicalDeviceVulkan11Features supported{};
+    VkPhysicalDeviceFeatures2 features{};
+    VkDeviceCreateInfo createInfo{};
+};
+
+TEST_F(Vulkan11DeviceFeaturesTest, RejectsEachUnsupportedFeatureWithoutChangingRequest) {
+    using Features = VkPhysicalDeviceVulkan11Features;
+    VkBool32 Features::* const fields[] = {
+        &Features::storageBuffer16BitAccess,
+        &Features::uniformAndStorageBuffer16BitAccess,
+        &Features::storagePushConstant16,
+        &Features::storageInputOutput16,
+        &Features::multiview,
+        &Features::multiviewGeometryShader,
+        &Features::multiviewTessellationShader,
+        &Features::variablePointersStorageBuffer,
+        &Features::variablePointers,
+        &Features::protectedMemory,
+        &Features::samplerYcbcrConversion,
+        &Features::shaderDrawParameters,
+    };
+    EXPECT_CALL(dispatch, vkGetPhysicalDeviceFeatures2(physicalDevice, _)).Times(12);
+    for (auto field : fields) {
+        requested = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+        requested.*field = VK_TRUE;
+        EXPECT_EQ(validate(), VK_ERROR_FEATURE_NOT_PRESENT);
+        EXPECT_EQ(requested.*field, VK_TRUE);
+        EXPECT_EQ(features.pNext, &requested);
+        EXPECT_EQ(requested.pNext, nullptr);
+    }
+}
+
+TEST_F(Vulkan11DeviceFeaturesTest, AcceptsSupportedAndDisabledFeatures) {
+    EXPECT_CALL(dispatch, vkGetPhysicalDeviceFeatures2(physicalDevice, _)).Times(3);
+    EXPECT_EQ(validate(), VK_SUCCESS);
+    supported.storageInputOutput16 = VK_TRUE;
+    requested.storageInputOutput16 = VK_TRUE;
+    EXPECT_EQ(validate(), VK_SUCCESS);
+    requested.storageInputOutput16 = VK_FALSE;
+    supported.storageInputOutput16 = VK_FALSE;
+    supported.multiview = VK_TRUE;
+    EXPECT_EQ(validate(), VK_SUCCESS);
+}
+
+TEST_F(Vulkan11DeviceFeaturesTest, IgnoresNonFeatureNodesAndPreservesChain) {
+    VkDevicePrivateDataCreateInfo privateData = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_PRIVATE_DATA_CREATE_INFO,
+        .pNext = &requested,
+        .privateDataSlotRequestCount = 2,
+    };
+    features.pNext = &privateData;
+    requested.shaderDrawParameters = VK_TRUE;
+    EXPECT_CALL(dispatch, vkGetPhysicalDeviceFeatures2(physicalDevice, _)).Times(1);
+    EXPECT_EQ(validate(), VK_ERROR_FEATURE_NOT_PRESENT);
+    EXPECT_EQ(features.pNext, &privateData);
+    EXPECT_EQ(privateData.pNext, &requested);
+    EXPECT_EQ(privateData.privateDataSlotRequestCount, 2);
+}
+
+TEST_F(Vulkan11DeviceFeaturesTest, DoesNotQueryWhenVulkan11FeaturesAreAbsent) {
+    EXPECT_CALL(dispatch, vkGetPhysicalDeviceFeatures2(_, _)).Times(0);
+    features.pNext = nullptr;
+    EXPECT_EQ(validate(), VK_SUCCESS);
+    createInfo.pNext = nullptr;
+    EXPECT_EQ(validate(), VK_SUCCESS);
+}
+
+TEST_F(Vulkan11DeviceFeaturesTest, AcceptsFeaturesDirectlyInDeviceChain) {
+    createInfo.pNext = &requested;
+    supported.shaderDrawParameters = VK_TRUE;
+    requested.shaderDrawParameters = VK_TRUE;
+    EXPECT_CALL(dispatch, vkGetPhysicalDeviceFeatures2(physicalDevice, _)).Times(1);
+    EXPECT_EQ(validate(), VK_SUCCESS);
+    EXPECT_EQ(createInfo.pNext, &requested);
+}
+
 template <typename Attachment>
 struct RenderPassTypes;
 
