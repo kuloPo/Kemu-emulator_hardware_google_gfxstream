@@ -346,7 +346,7 @@ bool VkEmulation::StagingBuffer::create(VulkanDispatch* vk, VkDevice device,
     }
 
     // Non-host coherent memory would require manual flush/invalidate
-    mIsHostCoherent = (memType.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    mIsHostCoherent = (memType.propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
