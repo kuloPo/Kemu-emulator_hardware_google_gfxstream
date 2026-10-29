@@ -553,7 +553,10 @@ class VkEmulation {
 
     bool readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
                                       uint32_t w, uint32_t h, void* outPixels,
-                                      uint64_t outPixelsSize) REQUIRES(mMutex);
+                                      uint64_t outPixelsSize,
+                                      std::unique_lock<std::mutex>* releaseLock = nullptr)
+        REQUIRES(mMutex);
+    bool prepareReadbackLocked(VkDeviceSize size) REQUIRES(mMutex);
 
     bool updateColorBufferFromBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
                                           uint32_t w, uint32_t h, const void* pixels,
@@ -680,7 +683,7 @@ class VkEmulation {
     struct StagingBuffer {
         VkDeviceMemory mMemory = VK_NULL_HANDLE;
         VkBuffer mBuffer = VK_NULL_HANDLE;
-        VkDeviceSize mAllocationSize;
+        VkDeviceSize mAllocationSize = 0;
         void* mMappedPtr = nullptr;
         bool mIsHostCoherent = false;
 
@@ -696,6 +699,15 @@ class VkEmulation {
 
     // Staging buffer to perform reads and updates on color buffers.
     StagingBuffer mStaging GUARDED_BY(mMutex);
+
+    // Serializes readbacks only. Acquire before mMutex, which is released after
+    // submission so unrelated rendering can continue during the GPU/CPU copy.
+    std::mutex mReadbackMutex;
+    StagingBuffer mReadbackStaging GUARDED_BY(mReadbackMutex);
+    VkDeviceSize mReadbackBufferSize = 0;
+    VkCommandPool mReadbackCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer mReadbackCommandBuffer = VK_NULL_HANDLE;
+    VkFence mReadbackFence = VK_NULL_HANDLE;
 
     // ColorBuffers are intended to back the guest's shareable images.
     // For example:

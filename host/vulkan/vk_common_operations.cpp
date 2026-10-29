@@ -1769,6 +1769,7 @@ void VkEmulation::initFeatures(Features features) {
 }
 
 VkEmulation::~VkEmulation() {
+    std::lock_guard<std::mutex> readbackLock(mReadbackMutex);
     std::lock_guard<std::mutex> lock(mMutex);
 
     mCompositorVk.reset();
@@ -1781,6 +1782,11 @@ VkEmulation::~VkEmulation() {
             mDvk->vkFreeCommandBuffers(mDevice, mCommandPool, 1, &cb);
         }
 
+        mReadbackStaging.destroy(mDvk, mDevice);
+        if (mReadbackFence) mDvk->vkDestroyFence(mDevice, mReadbackFence, nullptr);
+        if (mReadbackCommandPool) {
+            mDvk->vkDestroyCommandPool(mDevice, mReadbackCommandPool, nullptr);
+        }
         mStaging.destroy(mDvk, mDevice);
 
         mDvk->vkDestroyFence(mDevice, mCommandBufferFence, nullptr);
@@ -3371,8 +3377,42 @@ bool VkEmulation::colorBufferNeedsUpdateBetweenGlAndVk(uint32_t colorBufferHandl
     return colorBufferNeedsUpdateBetweenGlAndVk(*colorBufferInfo);
 }
 
+bool VkEmulation::prepareReadbackLocked(VkDeviceSize size) {
+    auto vk = mDvk;
+    if (!mReadbackCommandPool) {
+        const VkCommandPoolCreateInfo poolInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = mQueueFamilyIndex,
+        };
+        VK_CHECK(vk->vkCreateCommandPool(mDevice, &poolInfo, nullptr, &mReadbackCommandPool));
+        const VkCommandBufferAllocateInfo bufferInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = mReadbackCommandPool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        VK_CHECK(vk->vkAllocateCommandBuffers(mDevice, &bufferInfo, &mReadbackCommandBuffer));
+        const VkFenceCreateInfo fenceInfo = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        VK_CHECK(vk->vkCreateFence(mDevice, &fenceInfo, nullptr, &mReadbackFence));
+    }
+    if (size > kDefaultStagingBufferSize) return false;
+    if (size > mReadbackBufferSize) {
+        mReadbackStaging.destroy(vk, mDevice);
+        mReadbackBufferSize = 0;
+        if (!mReadbackStaging.create(vk, mDevice, &mDeviceInfo.memProps,
+                                    mDebugUtilsHelper, size)) {
+            mReadbackStaging.destroy(vk, mDevice);
+            return false;
+        }
+        mReadbackBufferSize = size;
+    }
+    return true;
+}
+
 bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector<uint8_t>* bytes) {
-    std::lock_guard<std::mutex> lock(mMutex);
+    std::lock_guard<std::mutex> readbackLock(mReadbackMutex);
+    std::unique_lock<std::mutex> lock(mMutex);
 
     auto colorBufferInfo = gfxstream::base::find(mColorBuffers, colorBufferHandle);
     if (!colorBufferInfo) {
@@ -3395,7 +3435,7 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector
 
     result = readColorBufferToBytesLocked(
         colorBufferHandle, 0, 0, colorBufferInfo->imageCreateInfoShallow.extent.width,
-        colorBufferInfo->imageCreateInfoShallow.extent.height, bytes->data(), bytes->size());
+        colorBufferInfo->imageCreateInfoShallow.extent.height, bytes->data(), bytes->size(), &lock);
     if (!result) {
         GFXSTREAM_ERROR("Failed to read from ColorBuffer:%d, failed to get read size.",
                         colorBufferHandle);
@@ -3408,13 +3448,15 @@ bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, std::vector
 bool VkEmulation::readColorBufferToBytes(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
                                          uint32_t w, uint32_t h, void* outPixels,
                                          uint64_t outPixelsSize) {
-    std::lock_guard<std::mutex> lock(mMutex);
-    return readColorBufferToBytesLocked(colorBufferHandle, x, y, w, h, outPixels, outPixelsSize);
+    std::lock_guard<std::mutex> readbackLock(mReadbackMutex);
+    std::unique_lock<std::mutex> lock(mMutex);
+    return readColorBufferToBytesLocked(colorBufferHandle, x, y, w, h, outPixels, outPixelsSize, &lock);
 }
 
 bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint32_t x, uint32_t y,
                                                uint32_t w, uint32_t h, void* outPixels,
-                                               uint64_t outPixelsSize) {
+                                               uint64_t outPixelsSize,
+                                               std::unique_lock<std::mutex>* releaseLock) {
     auto vk = mDvk;
 
     auto colorBufferInfo = gfxstream::base::find(mColorBuffers, colorBufferHandle);
@@ -3447,7 +3489,12 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
     VkDeviceSize bufferCopySize = transferInfo.stagingBufferCopySize;
     const std::vector<VkBufferImageCopy>& bufferImageCopies = transferInfo.bufferImageCopies;
 
-    const VkDeviceSize stagingBufferSize = mStaging.mAllocationSize;
+    const VkExtent3D extent = colorBufferInfo->imageCreateInfoShallow.extent;
+    if (releaseLock && !prepareReadbackLocked(bufferCopySize)) return false;
+    auto& staging = releaseLock ? mReadbackStaging : mStaging;
+    const VkCommandBuffer commandBuffer = releaseLock ? mReadbackCommandBuffer : mCommandBuffer;
+    const VkFence fence = releaseLock ? mReadbackFence : mCommandBufferFence;
+    const VkDeviceSize stagingBufferSize = staging.mAllocationSize;
     if (bufferCopySize > stagingBufferSize) {
         GFXSTREAM_ERROR("Failed to read ColorBuffer:%d, transfer size %" PRIu64
                         " too large for staging buffer size:%" PRIu64 ".",
@@ -3472,9 +3519,9 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         .pNext = nullptr,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
-    VK_CHECK(vk->vkBeginCommandBuffer(mCommandBuffer, &beginInfo));
+    VK_CHECK(vk->vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
-    mDebugUtilsHelper.cmdBeginDebugLabel(mCommandBuffer, "readColorBufferToBytes(ColorBuffer:%d)",
+    mDebugUtilsHelper.cmdBeginDebugLabel(commandBuffer, "readColorBufferToBytes(ColorBuffer:%d)",
                                          colorBufferHandle);
 
     const VkImageLayout currentLayout = colorBufferInfo->currentLayout;
@@ -3502,12 +3549,12 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
             },
     };
 
-    vk->vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+    vk->vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                              VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
                              &toTransferSrcImageBarrier);
 
-    vk->vkCmdCopyImageToBuffer(mCommandBuffer, colorBufferInfo->image,
-                               transferSrcLayout, mStaging.mBuffer,
+    vk->vkCmdCopyImageToBuffer(commandBuffer, colorBufferInfo->image,
+                               transferSrcLayout, staging.mBuffer,
                                bufferImageCopies.size(), bufferImageCopies.data());
 
     // Change back to original layout
@@ -3532,16 +3579,16 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
                     .layerCount = 1,
                 },
         };
-        vk->vkCmdPipelineBarrier(mCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        vk->vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                  &toCurrentLayoutImageBarrier);
     } else {
         colorBufferInfo->currentLayout = transferSrcLayout;
     }
 
-    mDebugUtilsHelper.cmdEndDebugLabel(mCommandBuffer);
+    mDebugUtilsHelper.cmdEndDebugLabel(commandBuffer);
 
-    VK_CHECK(vk->vkEndCommandBuffer(mCommandBuffer));
+    VK_CHECK(vk->vkEndCommandBuffer(commandBuffer));
 
     const VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -3550,19 +3597,25 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
         .pWaitSemaphores = nullptr,
         .pWaitDstStageMask = nullptr,
         .commandBufferCount = 1,
-        .pCommandBuffers = &mCommandBuffer,
+        .pCommandBuffers = &commandBuffer,
         .signalSemaphoreCount = 0,
         .pSignalSemaphores = nullptr,
     };
 
     {
         gfxstream::base::AutoLock queueLock(*mQueueLock);
-        VK_CHECK(vk->vkQueueSubmit(mQueue, 1, &submitInfo, mCommandBufferFence));
+        VK_CHECK(vk->vkQueueSubmit(mQueue, 1, &submitInfo, fence));
     }
+
+    // All image state and queue submission are protected above. The image is
+    // restored to its original layout on the queue. Destruction waits for the
+    // queue, and the remaining work uses only private staging data and copies
+    // of metadata, never a pointer into mColorBuffers.
+    if (releaseLock) releaseLock->unlock();
 
     static constexpr uint64_t ANB_MAX_WAIT_NS = 5ULL * 1000ULL * 1000ULL * 1000ULL;
     VkResult waitRes =
-        vk->vkWaitForFences(mDevice, 1, &mCommandBufferFence, VK_TRUE, ANB_MAX_WAIT_NS);
+        vk->vkWaitForFences(mDevice, 1, &fence, VK_TRUE, ANB_MAX_WAIT_NS);
     if (waitRes == VK_TIMEOUT) {
         // Give a warning and try once more on a timeout error
         GFXSTREAM_ERROR(
@@ -3570,20 +3623,20 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
             "(cb:%d, x:%d, y:%d, w:%d, h:%d, bufferCopySize:%llu), retrying...",
             colorBufferHandle, x, y, w, h, bufferCopySize);
         waitRes =
-            vk->vkWaitForFences(mDevice, 1, &mCommandBufferFence, VK_TRUE, ANB_MAX_WAIT_NS * 2);
+            vk->vkWaitForFences(mDevice, 1, &fence, VK_TRUE, ANB_MAX_WAIT_NS * 2);
     }
 
     VK_CHECK(waitRes);
 
-    VK_CHECK(vk->vkResetFences(mDevice, 1, &mCommandBufferFence));
+    VK_CHECK(vk->vkResetFences(mDevice, 1, &fence));
 
-    if (!mStaging.mIsHostCoherent) {
+    if (!staging.mIsHostCoherent) {
         // Invalidate host cache lines to ensure the subsequent readback
         // will see the latest writes made by the GPU.
         const VkMappedMemoryRange toInvalidate = {
             .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
             .pNext = nullptr,
-            .memory = mStaging.mMemory,
+            .memory = staging.mMemory,
             .offset = 0,
             .size = VK_WHOLE_SIZE,
         };
@@ -3602,8 +3655,8 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
                 colorBufferHandle, bufferCopySize, outPixelsSize);
             return false;
         }
-        transferInfo.unpackFunction(colorBufferInfo->imageCreateInfoShallow.extent,
-                                    (const uint8_t*)mStaging.mMappedPtr, (uint8_t*)outPixels);
+        transferInfo.unpackFunction(extent,
+                                    (const uint8_t*)staging.mMappedPtr, (uint8_t*)outPixels);
     } else {
         if (bufferCopySize > outPixelsSize) {
             GFXSTREAM_ERROR(
@@ -3612,7 +3665,7 @@ bool VkEmulation::readColorBufferToBytesLocked(uint32_t colorBufferHandle, uint3
                 bufferCopySize, outPixelsSize);
             bufferCopySize = outPixelsSize;
         }
-        std::memcpy(outPixels, mStaging.mMappedPtr, bufferCopySize);
+        std::memcpy(outPixels, staging.mMappedPtr, bufferCopySize);
     }
 
     return true;

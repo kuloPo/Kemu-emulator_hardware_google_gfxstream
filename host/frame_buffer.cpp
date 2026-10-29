@@ -2497,6 +2497,10 @@ void FrameBuffer::Impl::readColorBuffer(HandleType p_colorbuffer, int x, int y, 
         return;
     }
 
+    // Restore under the global lock, then retain the image while Vulkan waits
+    // on its private readback resources. GL still needs the shared context lock.
+    colorBuffer->touch();
+    if (!colorBuffer->getColorBufferGl()) mutex.unlock();
     colorBuffer->readToBytes(x, y, width, height, pixelsFormat, outPixels, outPixelsSize);
 }
 
@@ -2525,6 +2529,8 @@ void FrameBuffer::Impl::readColorBufferYUV(HandleType p_colorbuffer, int x, int 
         return;
     }
 
+    colorBuffer->touch();
+    if (!colorBuffer->getColorBufferGl()) mutex.unlock();
     colorBuffer->readYuvToBytes(x, y, width, height, outPixels, outPixelsSize);
 }
 
